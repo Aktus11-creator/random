@@ -1,0 +1,27 @@
+{
+	"schemaVersion": 1,
+	"id": "framegen",
+	"version": "${version}",
+	"name": "FrameGen",
+	"description": "Depth-aware frame generation for Minecraft. Presents reprojected in-between frames on a dedicated presentation thread so camera motion runs at your display's refresh rate even when the game renders far fewer frames.",
+	"authors": ["FrameGen contributors"],
+	"license": "MIT",
+	"icon": "assets/framegen/icon.png",
+	"environment": "client",
+	"entrypoints": {
+		"client": ["dev.framegen.FrameGenMod"],
+		"modmenu": ["dev.framegen.compat.ModMenuIntegration"]
+	},
+	"mixins": [
+		{ "config": "framegen.mixins.json", "environment": "client" }
+	],
+	"depends": {
+		"fabricloader": ">=0.20.1",
+		"minecraft": "~26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	},
+	"suggests": {
+		"modmenu": "*"
+	}
+}

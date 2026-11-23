@@ -1,0 +1,68 @@
+package dev.framegen.engine;
+
+import java.util.ArrayList;
+import java.util.List;
+import org.joml.Matrix4f;
+import org.jspecify.annotations.Nullable;
+
+/**
+ * Everything the presenter needs to know about one frame the game rendered. Filled in on the render thread,
+ * immutable once handed to {@link FrameExchange#publish}.
+ */
+public final class FrameRecord {
+	public final long id;
+	/** {@link System#nanoTime()} at which the game sampled this frame's camera (start of extraction). */
+	public long simNanos;
+	public int width;
+	public int height;
+
+	/** True when the overlay slot holds the complete final image and there is no separable world layer (menus, loading, FG off). */
+	public boolean opaque;
+	public @Nullable GpuSlot world;
+	public @Nullable GpuSlot overlay;
+
+	/** Projection actually used for the level, including view bobbing and nausea distortion. */
+	public final Matrix4f projection = new Matrix4f();
+	/** Camera rotation (model-view without translation); level geometry is camera-relative. */
+	public final Matrix4f viewRotation = new Matrix4f();
+	public double camX;
+	public double camY;
+	public double camZ;
+	/** Camera discontinuity before this frame (teleport, respawn, dimension change...). Never interpolate across. */
+	public boolean cut;
+	/** Depth buffer convention: true = glClipControl ZERO_TO_ONE (window depth == NDC z), false = default [-1, 1] mapping. */
+	public boolean zZeroToOne;
+
+	/** HUD vignette, applied to the world layer only (it multiplies, so it cannot live in the premultiplied overlay). */
+	public boolean vignette;
+	public float vignetteR;
+	public float vignetteG;
+	public float vignetteB;
+	public int vignetteTexture;
+
+	/** Invert-blended HUD elements (crosshair) that must be applied on top of the final, warped image. */
+	public final List<InvertQuad> invertQuads = new ArrayList<>(4);
+
+	/** Debug only: distance from the camera to the block under the crosshair, from Minecraft's raycast (NaN if none). */
+	public double debugHitDistance = Double.NaN;
+
+	/** GLsync created right after the frame's GPU work was submitted. Owned by whoever currently holds the record. */
+	long readyFence;
+	/** Presenter: when the fence was first observed signalled. */
+	long readyNanos;
+
+	FrameRecord(long id) {
+		this.id = id;
+	}
+
+	public boolean hasWorld() {
+		return !this.opaque && this.world != null;
+	}
+
+	/**
+	 * A screen-space quad drawn with Minecraft's INVERT blend function ({@code src*(1-dst) + dst*(1-src)}).
+	 * Coordinates are framebuffer pixels with the origin in the top left corner.
+	 */
+	public record InvertQuad(float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, int texture, float r, float g, float b, float a) {
+	}
+}

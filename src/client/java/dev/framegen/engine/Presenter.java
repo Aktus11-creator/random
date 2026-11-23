@@ -1,0 +1,845 @@
+package dev.framegen.engine;
+
+import dev.framegen.FrameGenConfig;
+import dev.framegen.FrameGenMod;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
+import java.util.function.BooleanSupplier;
+import org.joml.Matrix4f;
+import org.jspecify.annotations.Nullable;
+import org.lwjgl.opengl.GL;
+import org.lwjgl.opengl.GL33C;
+import org.lwjgl.sdl.SDLError;
+import org.lwjgl.sdl.SDLVideo;
+
+/**
+ * The presentation thread. Owns a second OpenGL context (sharing textures with Minecraft's) that is current on the
+ * game window, and is the only thing that ever swaps the window's buffers.
+ *
+ * <p>Minecraft renders into offscreen textures at whatever rate it can manage and publishes each finished frame
+ * (color, depth, HUD overlay, camera matrices) through the {@link FrameExchange}. This thread runs at the display's
+ * refresh rate: every refresh it picks the real frames surrounding the moment it wants to show, reprojects them into
+ * the camera pose for that moment and composites the HUD on top. Because it is a separate thread with a separate GL
+ * context, the driver can schedule these small passes between (or alongside) the game's own GPU work: that is what
+ * makes the generated frames arrive evenly spaced instead of bunched up next to the real ones.
+ */
+public final class Presenter implements Runnable {
+	private static final long NANOS_PER_SECOND = 1_000_000_000L;
+	/** Real frames further apart than this are not interpolated between (a menu was open, or the game froze). */
+	static final long STALE_FRAME_NANOS = 1_000_000_000L;
+	static final boolean DEBUG_LOG = Boolean.getBoolean("framegen.debug");
+	private long lastDebugLog;
+
+	private final FrameExchange exchange;
+	private final long window;
+	private final long context;
+	private final BooleanSupplier iconified;
+	private final CountDownLatch started = new CountDownLatch(1);
+	private volatile boolean running = true;
+	private volatile @Nullable Throwable initFailure;
+	private @Nullable Thread thread;
+
+	// ---- Written by the render thread, read here -------------------------------------------------------------
+	private volatile int surfaceWidth = 1;
+	private volatile int surfaceHeight = 1;
+	private volatile boolean vsync = true;
+	private volatile double displayHz = 60.0;
+
+	// ---- Statistics, written here, read by the HUD -----------------------------------------------------------
+	private volatile float statOutputFps;
+	private volatile float statRealFps;
+	private volatile float statLatencyMs;
+	private volatile float statPresentCostMs;
+	private volatile boolean statGenerating;
+
+	// ---- Presenter-thread state ------------------------------------------------------------------------------
+	private GlProgram warp;
+	private GlProgram passthrough;
+	private GlProgram invertQuad;
+	private int vao;
+	private int linearSampler;
+	private int nearestSampler;
+	private int appliedSwapInterval = Integer.MIN_VALUE;
+	private final ArrayDeque<FrameRecord> inflight = new ArrayDeque<>();
+	private final List<FrameRecord> history = new ArrayList<>();
+	private final List<FrameRecord> taken = new ArrayList<>();
+	private long lastShownRecordId;
+	private long lastPresentNanos;
+	/** Presentation delay of the playback clock (see {@link #chooseDisplayTime}). */
+	private double delayNanos = -1.0;
+	private boolean wasGenerating;
+	private long lastClockNanos;
+	private FrameGenConfig.@Nullable Mode clockMode;
+	private double lastDisplaySim = Double.NEGATIVE_INFINITY;
+	private double latencyEma = -1.0;
+	private double intervalEma = -1.0;
+	private double latencyHigh = -1.0;
+	private double intervalHigh = -1.0;
+	private int vsyncIneffectiveStreak;
+	private boolean vsyncHonored = true;
+	private long statWindowStart;
+	private int statOutputFrames;
+	private int statRealFrames;
+	private double statCostAccum;
+	private boolean glErrorLogged;
+
+	private final Pose poseA = new Pose();
+	private final Pose poseB = new Pose();
+	private final Pose target = new Pose();
+	private final Matrix4f fwd = new Matrix4f();
+	private final Matrix4f fwdRot = new Matrix4f();
+	private final Matrix4f inv = new Matrix4f();
+	private final Matrix4f invRot = new Matrix4f();
+
+	Presenter(FrameExchange exchange, long window, long context, BooleanSupplier iconified) {
+		this.exchange = exchange;
+		this.window = window;
+		this.context = context;
+		this.iconified = iconified;
+	}
+
+	/** Starts the thread and waits until it has initialized its GL state. Returns false (thread gone) on failure. */
+	boolean start() {
+		Thread t = new Thread(this, "FrameGen Presenter");
+		t.setDaemon(true);
+		t.setPriority(Thread.MAX_PRIORITY);
+		this.thread = t;
+		t.start();
+		try {
+			if (!this.started.await(10, TimeUnit.SECONDS)) {
+				FrameGenMod.LOGGER.error("FrameGen presenter thread did not start in time");
+				this.stop();
+				return false;
+			}
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			return false;
+		}
+		if (this.initFailure != null) {
+			FrameGenMod.LOGGER.error("FrameGen presenter failed to initialize", this.initFailure);
+			return false;
+		}
+		return true;
+	}
+
+	void stop() {
+		this.running = false;
+		this.exchange.close();
+		Thread t = this.thread;
+		if (t != null) {
+			try {
+				t.join(5000);
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+			if (t.isAlive()) {
+				FrameGenMod.LOGGER.warn("FrameGen presenter thread did not stop in time");
+			}
+		}
+	}
+
+	boolean isAlive() {
+		Thread t = this.thread;
+		return t != null && t.isAlive();
+	}
+
+	void configure(int width, int height, boolean vsync) {
+		this.surfaceWidth = Math.max(1, width);
+		this.surfaceHeight = Math.max(1, height);
+		this.vsync = vsync;
+	}
+
+	void setDisplayHz(double hz) {
+		if (hz >= 20.0 && hz <= 1000.0) {
+			this.displayHz = hz;
+		}
+	}
+
+	double displayHz() {
+		return this.displayHz;
+	}
+
+	public float outputFps() {
+		return this.statOutputFps;
+	}
+
+	public float realFps() {
+		return this.statRealFps;
+	}
+
+	public float latencyMs() {
+		return this.statLatencyMs;
+	}
+
+	public float presentCostMs() {
+		return this.statPresentCostMs;
+	}
+
+	public boolean isGenerating() {
+		return this.statGenerating;
+	}
+
+	// ==========================================================================================================
+
+	@Override
+	public void run() {
+		try {
+			if (!SDLVideo.SDL_GL_MakeCurrent(this.window, this.context)) {
+				throw new IllegalStateException("SDL_GL_MakeCurrent failed: " + SDLError.SDL_GetError());
+			}
+			GL.createCapabilities();
+			this.initGl();
+		} catch (Throwable t) {
+			this.initFailure = t;
+			this.running = false;
+			try {
+				SDLVideo.SDL_GL_MakeCurrent(this.window, 0L);
+			} catch (Throwable ignored) {
+			}
+			this.started.countDown();
+			return;
+		}
+		this.started.countDown();
+
+		try {
+			this.statWindowStart = System.nanoTime();
+			while (this.running) {
+				this.frame();
+			}
+		} catch (Throwable t) {
+			FrameGenMod.LOGGER.error("FrameGen presenter crashed; the game will keep running without it", t);
+			FrameGenEngine.onPresenterCrashed(t);
+		} finally {
+			this.cleanupGl();
+			SDLVideo.SDL_GL_MakeCurrent(this.window, 0L);
+			GL.setCapabilities(null);
+		}
+	}
+
+	private void initGl() {
+		this.warp = new GlProgram("warp", "fullscreen.vsh", "warp.fsh");
+		this.passthrough = new GlProgram("passthrough", "fullscreen.vsh", "passthrough.fsh");
+		this.invertQuad = new GlProgram("invert_quad", "invert_quad.vsh", "invert_quad.fsh");
+
+		this.warp.use();
+		this.warp.setInt("uColorA", 0);
+		this.warp.setInt("uDepthA", 1);
+		this.warp.setInt("uColorB", 2);
+		this.warp.setInt("uDepthB", 3);
+		this.warp.setInt("uOverlay", 4);
+		this.warp.setInt("uVignetteTex", 5);
+		this.passthrough.use();
+		this.passthrough.setInt("uOverlay", 4);
+		this.invertQuad.use();
+		this.invertQuad.setInt("uTexture", 6);
+		GL33C.glUseProgram(0);
+
+		this.vao = GL33C.glGenVertexArrays();
+		this.linearSampler = GL33C.glGenSamplers();
+		configureSampler(this.linearSampler, GL33C.GL_LINEAR);
+		this.nearestSampler = GL33C.glGenSamplers();
+		configureSampler(this.nearestSampler, GL33C.GL_NEAREST);
+
+		GL33C.glDisable(GL33C.GL_DEPTH_TEST);
+		GL33C.glDisable(GL33C.GL_CULL_FACE);
+		GL33C.glDisable(GL33C.GL_SCISSOR_TEST);
+		GL33C.glDisable(GL33C.GL_BLEND);
+		GL33C.glDisable(GL33C.GL_FRAMEBUFFER_SRGB);
+		int error = GL33C.glGetError();
+		if (error != 0) {
+			throw new IllegalStateException("GL error during presenter init: " + error);
+		}
+	}
+
+	private static void configureSampler(int sampler, int filter) {
+		GL33C.glSamplerParameteri(sampler, GL33C.GL_TEXTURE_MIN_FILTER, filter);
+		GL33C.glSamplerParameteri(sampler, GL33C.GL_TEXTURE_MAG_FILTER, filter);
+		GL33C.glSamplerParameteri(sampler, GL33C.GL_TEXTURE_WRAP_S, GL33C.GL_CLAMP_TO_EDGE);
+		GL33C.glSamplerParameteri(sampler, GL33C.GL_TEXTURE_WRAP_T, GL33C.GL_CLAMP_TO_EDGE);
+		GL33C.glSamplerParameteri(sampler, GL33C.GL_TEXTURE_COMPARE_MODE, GL33C.GL_NONE);
+	}
+
+	private void cleanupGl() {
+		try {
+			// Make sure nothing still reads the slots before handing them back without fences.
+			GL33C.glFinish();
+			for (FrameRecord r : this.history) {
+				this.releaseRecord(r, false);
+			}
+			this.history.clear();
+			for (FrameRecord r : this.inflight) {
+				if (r.readyFence != 0L) {
+					GL33C.glDeleteSync(r.readyFence);
+					r.readyFence = 0L;
+				}
+				this.releaseRecord(r, false);
+			}
+			this.inflight.clear();
+			if (this.warp != null) this.warp.close();
+			if (this.passthrough != null) this.passthrough.close();
+			if (this.invertQuad != null) this.invertQuad.close();
+			if (this.vao != 0) GL33C.glDeleteVertexArrays(this.vao);
+			if (this.testFbo != 0) GL33C.glDeleteFramebuffers(this.testFbo);
+			if (this.testTexture != 0) GL33C.glDeleteTextures(this.testTexture);
+			if (this.testBlank != 0) GL33C.glDeleteTextures(this.testBlank);
+			if (this.linearSampler != 0) GL33C.glDeleteSamplers(this.linearSampler);
+			if (this.nearestSampler != 0) GL33C.glDeleteSamplers(this.nearestSampler);
+		} catch (Throwable t) {
+			FrameGenMod.LOGGER.warn("FrameGen presenter cleanup failed", t);
+		}
+	}
+
+	// ==========================================================================================================
+
+	private void frame() {
+		if (this.iconified.getAsBoolean()) {
+			this.ingest();
+			this.exchange.awaitPublish(TimeUnit.MILLISECONDS.toNanos(50));
+			return;
+		}
+
+		FrameGenConfig config = FrameGenConfig.get();
+		this.ingest();
+		FrameRecord newest = this.history.isEmpty() ? null : this.history.getLast();
+		if (newest == null) {
+			this.exchange.awaitPublish(TimeUnit.MILLISECONDS.toNanos(2));
+			return;
+		}
+
+		boolean generate = config.enabled && newest.hasWorld();
+		if (!generate && newest.id == this.lastShownRecordId) {
+			// Nothing new to show and nothing to generate: wait for the game instead of re-presenting the same image.
+			this.statGenerating = false;
+			this.exchange.awaitPublish(TimeUnit.MICROSECONDS.toNanos(500));
+			this.updateStats(System.nanoTime());
+			return;
+		}
+
+		int interval = this.vsync ? 1 : 0;
+		if (interval != this.appliedSwapInterval) {
+			if (!SDLVideo.SDL_GL_SetSwapInterval(interval) && interval != 0) {
+				FrameGenMod.LOGGER.warn("Couldn't enable V-Sync on the presenter context: {}", SDLError.SDL_GetError());
+			}
+			this.appliedSwapInterval = interval;
+		}
+
+		long start = System.nanoTime();
+		int w = this.surfaceWidth;
+		int h = this.surfaceHeight;
+		GL33C.glBindFramebuffer(GL33C.GL_FRAMEBUFFER, 0);
+		GL33C.glViewport(0, 0, w, h);
+		GL33C.glBindVertexArray(this.vao);
+
+		FrameRecord overlaySource = newest;
+		if (generate) {
+			this.statGenerating = true;
+			this.drawGenerated(config, start, w, h);
+			this.wasGenerating = true;
+		} else {
+			this.statGenerating = false;
+			this.wasGenerating = false;
+			this.lastDisplaySim = Double.NEGATIVE_INFINITY;
+			if (newest.opaque) {
+				this.drawOpaque(newest);
+			} else {
+				this.target.set(newest);
+				this.drawWarp(config, null, newest, 0.0, w, h);
+			}
+		}
+		this.drawInvertQuads(overlaySource);
+		GL33C.glBindVertexArray(0);
+
+		if (!this.glErrorLogged) {
+			int error = GL33C.glGetError();
+			if (error != 0) {
+				this.glErrorLogged = true;
+				FrameGenMod.LOGGER.warn("FrameGen presenter GL error {} (logged once)", error);
+			}
+		}
+
+		long beforeSwap = System.nanoTime();
+		this.statCostAccum += (beforeSwap - start) / 1e6;
+		SDLVideo.SDL_GL_SwapWindow(this.window);
+		if (config.lowLatencyPresent) {
+			GL33C.glFinish();
+		}
+		long now = System.nanoTime();
+		boolean newReal = newest.id != this.lastShownRecordId;
+		this.lastShownRecordId = newest.id;
+		this.exchange.markDisplayed(newest.id);
+		this.releaseUnneeded(newest);
+
+		this.statOutputFrames++;
+		if (newReal) this.statRealFrames++;
+		this.pace(config, generate, now);
+		this.lastPresentNanos = System.nanoTime();
+		this.updateStats(this.lastPresentNanos);
+	}
+
+	/** Moves published records in, polls their fences and builds the history of ready frames. */
+	private void ingest() {
+		this.taken.clear();
+		this.exchange.take(this.taken);
+		this.inflight.addAll(this.taken);
+		long now = System.nanoTime();
+		while (!this.inflight.isEmpty()) {
+			FrameRecord r = this.inflight.peekFirst();
+			int status = GL33C.glClientWaitSync(r.readyFence, 0, 0L);
+			if (status != GL33C.GL_ALREADY_SIGNALED && status != GL33C.GL_CONDITION_SATISFIED) {
+				if (status == GL33C.GL_WAIT_FAILED) {
+					throw new IllegalStateException("glClientWaitSync failed");
+				}
+				break;
+			}
+			this.inflight.pollFirst();
+			GL33C.glDeleteSync(r.readyFence);
+			r.readyFence = 0L;
+			r.readyNanos = now;
+			this.onReady(r);
+		}
+	}
+
+	private void onReady(FrameRecord r) {
+		double latency = r.readyNanos - r.simNanos;
+		this.latencyEma = this.latencyEma < 0 ? latency : this.latencyEma + (latency - this.latencyEma) * 0.1;
+		this.latencyHigh = this.latencyHigh < 0 ? latency : smoothHigh(this.latencyHigh, latency);
+		FrameRecord prevWorld = this.newestWorld();
+		if (prevWorld != null && r.hasWorld() && !r.cut) {
+			double interval = r.simNanos - prevWorld.simNanos;
+			if (interval > 0 && interval < NANOS_PER_SECOND) {
+				this.intervalEma = this.intervalEma < 0 ? interval : this.intervalEma + (interval - this.intervalEma) * 0.1;
+				this.intervalHigh = this.intervalHigh < 0 ? interval : smoothHigh(this.intervalHigh, interval);
+			}
+		}
+		if (r.hasWorld() && prevWorld != null && r.simNanos - prevWorld.simNanos > STALE_FRAME_NANOS) {
+			r.cut = true; // stale history (menu was open, game hitched): don't interpolate across the gap
+		}
+		if (DEBUG_LOG && prevWorld != null && r.hasWorld() && !r.cut && r.readyNanos - this.lastSelfTest > 3_000_000_000L
+			&& prevWorld.world.width == r.world.width && prevWorld.world.height == r.world.height) {
+			this.lastSelfTest = r.readyNanos;
+			this.selfTest(prevWorld, r);
+		}
+		this.history.add(r);
+		// Keep the three newest world frames (interpolation needs to bracket the display time) plus the newest record.
+		int worlds = 0;
+		for (int i = this.history.size() - 1; i >= 0; i--) {
+			FrameRecord h = this.history.get(i);
+			boolean keep = i == this.history.size() - 1 || (h.hasWorld() && worlds < 3);
+			if (h.hasWorld()) worlds++;
+			if (!keep) {
+				this.history.remove(i);
+				this.releaseRecord(h, true);
+			}
+		}
+	}
+
+	/** Rises quickly, decays slowly: a robust "recent maximum" for jittery frame times. */
+	private static double smoothHigh(double current, double sample) {
+		return sample > current ? current + (sample - current) * 0.5 : current + (sample - current) * 0.03;
+	}
+
+	private @Nullable FrameRecord newestWorld() {
+		for (int i = this.history.size() - 1; i >= 0; i--) {
+			if (this.history.get(i).hasWorld()) return this.history.get(i);
+		}
+		return null;
+	}
+
+	// ---- Drawing ----------------------------------------------------------------------------------------------
+
+	private void drawOpaque(FrameRecord r) {
+		this.passthrough.use();
+		bindTexture(4, r.overlay.glColor, this.linearSampler);
+		GL33C.glDrawArrays(GL33C.GL_TRIANGLES, 0, 3);
+	}
+
+	private void drawGenerated(FrameGenConfig config, long now, int w, int h) {
+		List<FrameRecord> worlds = new ArrayList<>(4);
+		for (FrameRecord r : this.history) {
+			if (r.hasWorld()) worlds.add(r);
+		}
+		FrameRecord newest = worlds.getLast();
+		double displaySim = this.chooseDisplayTime(config, now, newest);
+
+		// Find A <= displaySim < B.
+		FrameRecord a = null;
+		FrameRecord b = null;
+		for (int i = worlds.size() - 1; i >= 0; i--) {
+			if (worlds.get(i).simNanos <= displaySim) {
+				a = worlds.get(i);
+				b = i + 1 < worlds.size() ? worlds.get(i + 1) : null;
+				break;
+			}
+		}
+		if (a == null) {
+			// Display time is older than everything we have: show the oldest frame as is.
+			FrameRecord only = worlds.getFirst();
+			this.target.set(only);
+			this.drawWarp(config, null, only, 0.0, w, h);
+			return;
+		}
+		if (b == null) {
+			// Past the newest frame: extrapolate from the last two (unless that crosses a cut).
+			if (worlds.size() >= 2 && !newest.cut) {
+				b = newest;
+				a = worlds.get(worlds.size() - 2);
+			} else {
+				this.target.set(newest);
+				this.drawWarp(config, null, newest, 0.0, w, h);
+				return;
+			}
+		}
+		if (b.cut) {
+			// Never blend across a teleport/respawn: hold A until B is due, then switch.
+			FrameRecord only = displaySim < b.simNanos ? a : b;
+			this.target.set(only);
+			this.drawWarp(config, null, only, 0.0, w, h);
+			return;
+		}
+
+		double span = Math.max(1.0, b.simNanos - a.simNanos);
+		double t = (displaySim - a.simNanos) / span;
+		double maxT = 1.0 + Math.max(0.0, config.maxExtrapolation) * Math.min(1.0, (this.intervalEma > 0 ? this.intervalEma : span) / span);
+		t = Math.max(0.0, Math.min(maxT, t));
+
+		this.poseA.set(a);
+		this.poseB.set(b);
+		this.target.blend(this.poseA, this.poseB, t);
+		boolean useA = t < 1.0 || config.quality.backgroundSearch;
+		this.drawWarp(config, useA ? a : null, b, Math.max(0.0, 1.0 - t), w, h);
+	}
+
+	/**
+	 * The playback clock. Returns the simulation timestamp to show at {@code now}.
+	 *
+	 * <p>Interpolation shows the world {@code delay} nanoseconds in the past, where {@code delay} is just large enough
+	 * that the next real frame is normally ready before we need it (render latency + one frame interval). The delay is
+	 * steered slowly so the motion speed never visibly changes; if a frame is late we hold rather than jump.
+	 * Extrapolation uses only the render latency, so generated frames continue past the newest real frame.
+	 */
+	private double chooseDisplayTime(FrameGenConfig config, long now, FrameRecord newest) {
+		double latency = Math.max(0.0, this.latencyHigh);
+		double interval = this.intervalHigh > 0 ? this.intervalHigh : (this.intervalEma > 0 ? this.intervalEma : 1e9 / 60.0);
+		double targetDelay = config.mode == FrameGenConfig.Mode.INTERPOLATE ? latency + interval * 1.05 + 1.0e6 : latency;
+		long previousCall = this.lastClockNanos;
+		this.lastClockNanos = now;
+		boolean modeChanged = config.mode != this.clockMode;
+		this.clockMode = config.mode;
+		if (this.delayNanos < 0 || !this.wasGenerating || previousCall == 0L || modeChanged) {
+			this.delayNanos = targetDelay;
+			this.lastDisplaySim = Double.NEGATIVE_INFINITY;
+		} else {
+			// Glide towards the target so motion speed never visibly jumps: normally at most a 4% playback speed
+			// change, but catch up faster when far off (after a hitch the delay must not stay high for long).
+			double frameTime = previousCall > 0 ? Math.min(50e6, now - previousCall) : 0.0;
+			double error = targetDelay - this.delayNanos;
+			double rate = Math.abs(error) > 2.0 * interval ? 0.25 : 0.04;
+			double maxStep = frameTime * rate;
+			this.delayNanos += Math.max(-maxStep, Math.min(maxStep, error));
+		}
+		double sim = now - this.delayNanos;
+		if (config.mode == FrameGenConfig.Mode.INTERPOLATE && sim > newest.simNanos) {
+			// Starving: the next frame is late. Hold at the newest frame and lengthen the delay so it doesn't recur.
+			this.delayNanos = now - newest.simNanos;
+			sim = newest.simNanos;
+		}
+		if (sim < this.lastDisplaySim) {
+			sim = this.lastDisplaySim; // never run backwards
+		}
+		this.lastDisplaySim = sim;
+		return sim;
+	}
+
+	/**
+	 * Draws the world reprojected into {@link #target} from frame {@code b} (and {@code a} if given, with temporal
+	 * weight {@code weightA}), the vignette and the overlay of the newest frame.
+	 */
+	private void drawWarp(FrameGenConfig config, @Nullable FrameRecord a, FrameRecord b, double weightA, int w, int h) {
+		FrameRecord overlay = this.history.getLast();
+		GlProgram p = this.warp;
+		p.use();
+
+		this.poseB.set(b);
+		this.target.reprojection(this.poseB, this.fwd, this.fwdRot, this.inv, this.invRot);
+		p.setMat4("uFwdB", this.fwd);
+		p.setMat4("uFwdRotB", this.fwdRot);
+		p.setMat4("uInvB", this.inv);
+		p.setMat4("uInvRotB", this.invRot);
+		p.setVec2("uSizeB", b.world.width, b.world.height);
+		bindTexture(2, b.world.glColor, this.linearSampler);
+		bindTexture(3, b.world.glDepth, this.nearestSampler);
+
+		if (a != null) {
+			this.poseA.set(a);
+			this.target.reprojection(this.poseA, this.fwd, this.fwdRot, this.inv, this.invRot);
+			p.setMat4("uFwdA", this.fwd);
+			p.setMat4("uFwdRotA", this.fwdRot);
+			p.setMat4("uInvA", this.inv);
+			p.setMat4("uInvRotA", this.invRot);
+			p.setVec2("uSizeA", a.world.width, a.world.height);
+			bindTexture(0, a.world.glColor, this.linearSampler);
+			bindTexture(1, a.world.glDepth, this.nearestSampler);
+		} else {
+			bindTexture(0, b.world.glColor, this.linearSampler);
+			bindTexture(1, b.world.glDepth, this.nearestSampler);
+		}
+		p.setInt("uUseA", a != null ? 1 : 0);
+		p.setFloat("uWeightA", (float) weightA);
+		p.setVec2("uOutSize", w, h);
+		p.setInt("uIterations", config.quality.iterations);
+		p.setInt("uBackgroundSearch", config.quality.backgroundSearch ? 1 : 0);
+		p.setInt("uZeroToOne", b.zZeroToOne ? 1 : 0);
+		p.setInt("uDebug", config.debugView ? 1 : 0);
+
+		if (overlay.vignette && overlay.vignetteTexture != 0) {
+			p.setInt("uVignette", 1);
+			p.setVec3("uVignetteColor", overlay.vignetteR, overlay.vignetteG, overlay.vignetteB);
+			bindTexture(5, overlay.vignetteTexture, this.linearSampler);
+		} else {
+			p.setInt("uVignette", 0);
+			bindTexture(5, b.world.glColor, this.linearSampler);
+		}
+		bindTexture(4, overlay.overlay.glColor, this.linearSampler);
+		GL33C.glDrawArrays(GL33C.GL_TRIANGLES, 0, 3);
+	}
+
+	private void drawInvertQuads(FrameRecord r) {
+		if (r.invertQuads.isEmpty() || r.width <= 0 || r.height <= 0) return;
+		GlProgram p = this.invertQuad;
+		p.use();
+		GL33C.glEnable(GL33C.GL_BLEND);
+		GL33C.glBlendEquation(GL33C.GL_FUNC_ADD);
+		GL33C.glBlendFuncSeparate(GL33C.GL_ONE_MINUS_DST_COLOR, GL33C.GL_ONE_MINUS_SRC_COLOR, GL33C.GL_ONE, GL33C.GL_ZERO);
+		float sx = 2.0f / r.width;
+		float sy = 2.0f / r.height;
+		for (FrameRecord.InvertQuad q : r.invertQuads) {
+			p.setVec4("uRect", q.x0() * sx - 1.0f, 1.0f - q.y0() * sy, q.x1() * sx - 1.0f, 1.0f - q.y1() * sy);
+			p.setVec4("uUvRect", q.u0(), q.v0(), q.u1(), q.v1());
+			p.setVec4("uColor", q.r(), q.g(), q.b(), q.a());
+			bindTexture(6, q.texture(), this.nearestSampler);
+			GL33C.glDrawArrays(GL33C.GL_TRIANGLE_STRIP, 0, 4);
+		}
+		GL33C.glDisable(GL33C.GL_BLEND);
+	}
+
+	private static void bindTexture(int unit, int texture, int sampler) {
+		GL33C.glActiveTexture(GL33C.GL_TEXTURE0 + unit);
+		GL33C.glBindTexture(GL33C.GL_TEXTURE_2D, texture);
+		GL33C.glBindSampler(unit, sampler);
+	}
+
+	// ---- Self test (debug only) -------------------------------------------------------------------------------
+
+	private long lastSelfTest;
+	private int testFbo;
+	private int testTexture;
+	private int testBlank;
+	private int testWidth;
+	private int testHeight;
+
+	/**
+	 * Reprojects real frame {@code a} into the exact camera of real frame {@code b} and compares the result with
+	 * {@code b} itself. Logs the PSNR of the reprojection next to the PSNR of simply reusing {@code a}: if the
+	 * geometry (matrices, depth convention, camera-relative translation) is right, the first is much higher.
+	 * Only differences from things that moved on their own and from disocclusions remain.
+	 */
+	private void selfTest(FrameRecord a, FrameRecord b) {
+		int w = b.world.width;
+		int h = b.world.height;
+		if (this.testFbo == 0 || this.testWidth != w || this.testHeight != h) {
+			if (this.testFbo == 0) {
+				this.testFbo = GL33C.glGenFramebuffers();
+				this.testBlank = GL33C.glGenTextures();
+				GL33C.glBindTexture(GL33C.GL_TEXTURE_2D, this.testBlank);
+				GL33C.glTexImage2D(GL33C.GL_TEXTURE_2D, 0, GL33C.GL_RGBA8, 1, 1, 0, GL33C.GL_RGBA, GL33C.GL_UNSIGNED_BYTE, new int[]{0});
+			}
+			if (this.testTexture != 0) GL33C.glDeleteTextures(this.testTexture);
+			this.testTexture = GL33C.glGenTextures();
+			GL33C.glBindTexture(GL33C.GL_TEXTURE_2D, this.testTexture);
+			GL33C.glTexImage2D(GL33C.GL_TEXTURE_2D, 0, GL33C.GL_RGBA8, w, h, 0, GL33C.GL_RGBA, GL33C.GL_UNSIGNED_BYTE, (java.nio.ByteBuffer) null);
+			this.testWidth = w;
+			this.testHeight = h;
+		}
+		GL33C.glBindFramebuffer(GL33C.GL_FRAMEBUFFER, this.testFbo);
+		GL33C.glFramebufferTexture2D(GL33C.GL_FRAMEBUFFER, GL33C.GL_COLOR_ATTACHMENT0, GL33C.GL_TEXTURE_2D, this.testTexture, 0);
+		GL33C.glViewport(0, 0, w, h);
+		GL33C.glBindVertexArray(this.vao);
+
+		FrameGenConfig config = FrameGenConfig.get();
+		GlProgram p = this.warp;
+		p.use();
+		this.target.set(b);
+		this.poseA.set(a);
+		this.target.reprojection(this.poseA, this.fwd, this.fwdRot, this.inv, this.invRot);
+		p.setMat4("uFwdB", this.fwd);
+		p.setMat4("uFwdRotB", this.fwdRot);
+		p.setMat4("uInvB", this.inv);
+		p.setMat4("uInvRotB", this.invRot);
+		p.setVec2("uSizeB", w, h);
+		p.setVec2("uOutSize", w, h);
+		p.setInt("uUseA", 0);
+		p.setFloat("uWeightA", 0.0f);
+		p.setInt("uIterations", config.quality.iterations);
+		p.setInt("uBackgroundSearch", config.quality.backgroundSearch ? 1 : 0);
+		p.setInt("uZeroToOne", a.zZeroToOne ? 1 : 0);
+		p.setInt("uDebug", 0);
+		p.setInt("uVignette", 0);
+		bindTexture(0, a.world.glColor, this.linearSampler);
+		bindTexture(1, a.world.glDepth, this.nearestSampler);
+		bindTexture(2, a.world.glColor, this.linearSampler);
+		bindTexture(3, a.world.glDepth, this.nearestSampler);
+		bindTexture(4, this.testBlank, this.linearSampler);
+		bindTexture(5, this.testBlank, this.linearSampler);
+		GL33C.glDrawArrays(GL33C.GL_TRIANGLES, 0, 3);
+
+		java.nio.ByteBuffer warped = org.lwjgl.system.MemoryUtil.memAlloc(w * h * 4);
+		java.nio.ByteBuffer real = org.lwjgl.system.MemoryUtil.memAlloc(w * h * 4);
+		java.nio.ByteBuffer old = org.lwjgl.system.MemoryUtil.memAlloc(w * h * 4);
+		try {
+			GL33C.glReadPixels(0, 0, w, h, GL33C.GL_RGBA, GL33C.GL_UNSIGNED_BYTE, warped);
+			GL33C.glFramebufferTexture2D(GL33C.GL_FRAMEBUFFER, GL33C.GL_COLOR_ATTACHMENT0, GL33C.GL_TEXTURE_2D, b.world.glColor, 0);
+			GL33C.glReadPixels(0, 0, w, h, GL33C.GL_RGBA, GL33C.GL_UNSIGNED_BYTE, real);
+			GL33C.glFramebufferTexture2D(GL33C.GL_FRAMEBUFFER, GL33C.GL_COLOR_ATTACHMENT0, GL33C.GL_TEXTURE_2D, a.world.glColor, 0);
+			GL33C.glReadPixels(0, 0, w, h, GL33C.GL_RGBA, GL33C.GL_UNSIGNED_BYTE, old);
+			if (!Double.isNaN(a.debugHitDistance)) {
+				// Decode the depth at the screen center of A back to a distance and compare with the raycast.
+				java.nio.FloatBuffer depth = org.lwjgl.system.MemoryUtil.memAllocFloat(1);
+				GL33C.glFramebufferTexture2D(GL33C.GL_FRAMEBUFFER, GL33C.GL_COLOR_ATTACHMENT0, GL33C.GL_TEXTURE_2D, 0, 0);
+				GL33C.glFramebufferTexture2D(GL33C.GL_FRAMEBUFFER, GL33C.GL_DEPTH_ATTACHMENT, GL33C.GL_TEXTURE_2D, a.world.glDepth, 0);
+				GL33C.glReadPixels(w / 2, h / 2, 1, 1, GL33C.GL_DEPTH_COMPONENT, GL33C.GL_FLOAT, depth);
+				GL33C.glFramebufferTexture2D(GL33C.GL_FRAMEBUFFER, GL33C.GL_DEPTH_ATTACHMENT, GL33C.GL_TEXTURE_2D, 0, 0);
+				float d = depth.get(0);
+				org.lwjgl.system.MemoryUtil.memFree(depth);
+				org.joml.Matrix4d invP = new org.joml.Matrix4d(a.projection).invert();
+				org.joml.Vector4d v = invP.transform(new org.joml.Vector4d(0.0, 0.0, a.zZeroToOne ? d : d * 2.0 - 1.0, 1.0));
+				double dist = Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z) / v.w;
+				FrameGenMod.LOGGER.info("[self-test] center depth {} -> {} blocks, raycast says {} blocks (zZeroToOne={})",
+					d, String.format("%.3f", dist), String.format("%.3f", a.debugHitDistance), a.zZeroToOne);
+				GL33C.glFramebufferTexture2D(GL33C.GL_FRAMEBUFFER, GL33C.GL_COLOR_ATTACHMENT0, GL33C.GL_TEXTURE_2D, this.testTexture, 0);
+			}
+			double warpedPsnr = psnr(warped, real, w * h, null);
+			double reusePsnr = psnr(old, real, w * h, null);
+			int[] covered = new int[1];
+			double coveredPsnr = psnr(warped, real, w * h, covered);
+			double dist = Pose.distance(this.poseA, this.target);
+			double angle = Math.toDegrees(Pose.angleBetween(this.poseA, this.target));
+			FrameGenMod.LOGGER.info("[self-test] camera moved {} blocks / {} deg: reprojection PSNR {} dB vs. frame reuse {} dB; {}% of pixels reconstructed confidently at {} dB",
+				String.format("%.2f", dist), String.format("%.1f", angle), String.format("%.1f", warpedPsnr), String.format("%.1f", reusePsnr),
+				String.format("%.1f", 100.0 * covered[0] / (w * h)), String.format("%.1f", coveredPsnr));
+		} finally {
+			org.lwjgl.system.MemoryUtil.memFree(warped);
+			org.lwjgl.system.MemoryUtil.memFree(real);
+			org.lwjgl.system.MemoryUtil.memFree(old);
+			GL33C.glFramebufferTexture2D(GL33C.GL_FRAMEBUFFER, GL33C.GL_COLOR_ATTACHMENT0, GL33C.GL_TEXTURE_2D, 0, 0);
+			GL33C.glBindFramebuffer(GL33C.GL_FRAMEBUFFER, 0);
+			GL33C.glBindVertexArray(0);
+		}
+	}
+
+	/** PSNR over all pixels, or (if {@code coveredOut} is given) only those whose alpha in {@code x} marks them confident. */
+	private static double psnr(java.nio.ByteBuffer x, java.nio.ByteBuffer y, int pixels, int @Nullable [] coveredOut) {
+		double sum = 0.0;
+		int counted = 0;
+		for (int i = 0; i < pixels; i++) {
+			if (coveredOut != null && (x.get(i * 4 + 3) & 0xFF) < 128) continue;
+			counted++;
+			for (int c = 0; c < 3; c++) {
+				int d = (x.get(i * 4 + c) & 0xFF) - (y.get(i * 4 + c) & 0xFF);
+				sum += d * d;
+			}
+		}
+		if (coveredOut != null) coveredOut[0] = counted;
+		if (counted == 0) return 0.0;
+		double mse = sum / (counted * 3.0);
+		return mse <= 1e-9 ? 99.0 : 10.0 * Math.log10(255.0 * 255.0 / mse);
+	}
+
+	// ---- Slot lifetime ----------------------------------------------------------------------------------------
+
+	/** After presenting: overlays of everything but the newest record are no longer needed. */
+	private void releaseUnneeded(FrameRecord newest) {
+		for (FrameRecord r : this.history) {
+			if (r != newest && r.overlay != null) {
+				this.exchange.release(r.overlay, fence());
+				r.overlay = null;
+			}
+		}
+	}
+
+	private void releaseRecord(FrameRecord r, boolean fenced) {
+		if (r.world != null) {
+			this.exchange.release(r.world, fenced ? fence() : 0L);
+			r.world = null;
+		}
+		if (r.overlay != null) {
+			this.exchange.release(r.overlay, fenced ? fence() : 0L);
+			r.overlay = null;
+		}
+	}
+
+	private static long fence() {
+		long sync = GL33C.glFenceSync(GL33C.GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+		GL33C.glFlush();
+		return sync;
+	}
+
+	// ---- Pacing -----------------------------------------------------------------------------------------------
+
+	private void pace(FrameGenConfig config, boolean generating, long presentedAt) {
+		double hz = this.displayHz;
+		double refreshNanos = 1e9 / hz;
+		if (this.vsync) {
+			// Detect drivers/compositors where swap doesn't block (or block reliably) and fall back to a timer.
+			long since = presentedAt - this.lastPresentNanos;
+			if (this.lastPresentNanos > 0 && since < refreshNanos * 0.5) {
+				if (++this.vsyncIneffectiveStreak > 20) this.vsyncHonored = false;
+			} else if (since > refreshNanos * 0.8) {
+				this.vsyncIneffectiveStreak = 0;
+				this.vsyncHonored = true;
+			}
+			if (this.vsyncHonored) return;
+		}
+		if (!generating) return; // passthrough without V-Sync: present as fast as frames arrive, like vanilla
+		double fps = config.targetOutputFps > 0 ? config.targetOutputFps : hz;
+		long deadline = this.lastPresentNanos + (long) (1e9 / fps);
+		sleepUntil(deadline);
+	}
+
+	private static void sleepUntil(long deadline) {
+		while (true) {
+			long remaining = deadline - System.nanoTime();
+			if (remaining <= 0L) return;
+			if (remaining > 1_500_000L) {
+				LockSupport.parkNanos(remaining - 1_000_000L);
+			} else {
+				Thread.onSpinWait();
+			}
+		}
+	}
+
+	private void updateStats(long now) {
+		long elapsed = now - this.statWindowStart;
+		if (elapsed >= 500_000_000L) {
+			double seconds = elapsed / 1e9;
+			this.statOutputFps = (float) (this.statOutputFrames / seconds);
+			this.statRealFps = (float) (this.statRealFrames / seconds);
+			this.statPresentCostMs = this.statOutputFrames > 0 ? (float) (this.statCostAccum / this.statOutputFrames) : 0.0f;
+			this.statLatencyMs = (float) (Math.max(0.0, this.delayNanos) / 1e6);
+			if (DEBUG_LOG && now - this.lastDebugLog > 2_000_000_000L) {
+				this.lastDebugLog = now;
+				FrameGenMod.LOGGER.info("[presenter] out {} fps, real {} fps, generating={}, delay {} ms, latency~{} ms, interval~{} ms, cost {} ms, history {}, inflight {}",
+					String.format("%.1f", this.statOutputFps), String.format("%.1f", this.statRealFps), this.statGenerating,
+					String.format("%.1f", this.statLatencyMs), String.format("%.1f", this.latencyHigh / 1e6), String.format("%.1f", this.intervalHigh / 1e6),
+					String.format("%.2f", this.statPresentCostMs), this.history.size(), this.inflight.size());
+			}
+			this.statOutputFrames = 0;
+			this.statRealFrames = 0;
+			this.statCostAccum = 0.0;
+			this.statWindowStart = now;
+		}
+	}
+}

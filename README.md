@@ -1,0 +1,166 @@
+# FrameGen — frame generation for Minecraft 26.3 (Fabric)
+
+FrameGen makes camera motion run at your monitor's refresh rate even when Minecraft renders far fewer real frames.
+It generates the in-between frames by **reprojecting** the last real frames, using their depth buffers and the exact
+camera matrices they were rendered with. It does not guess with optical flow.
+
+```
+game (render thread)      ██ real ██          ██ real ██          ██ real ██        e.g. 60 fps
+presenter (own thread)    ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌         e.g. 144 fps, evenly paced
+```
+
+## Features
+
+- **True decoupled presentation.** A dedicated presenter thread with its own OpenGL context owns the window and
+  presents at display refresh. The game renders offscreen at its own pace, so generated frames are evenly spaced.
+  If frame generation just slotted extra frames into the game's own loop, they would bunch up next to the real
+  frames and look no smoother.
+- **Depth-aware reprojection.** Camera rotation, translation (parallax), FOV changes and view bobbing are all
+  reconstructed geometrically. An iterative inverse-warp solver with edge-aware depth sampling finds, for each output
+  pixel, the source pixel that lands there. It fills disocclusions with background, not by smearing foreground edges.
+- **Two modes**
+  - *Interpolate* (default): blends between the two real frames around the displayed moment. It has the fewest
+    artifacts and adds about one real frame of latency.
+  - *Extrapolate*: predicts forward from the newest frame. It adds no latency but can briefly overshoot when you
+    stop turning.
+- **Sharp HUD and hand.** The world, the first-person hand and the HUD are captured as separate layers. Only the
+  world is reprojected, so the hotbar, chat, crosshair and hand never wobble or smear. The vignette (multiply blend)
+  and the crosshair (invert blend) are replayed exactly over the generated image.
+- **No visible change to the vanilla image.** Each real frame is rebuilt pixel-exactly in Minecraft's main target,
+  so F2 screenshots and other mods see the normal frame.
+- **Safe fallbacks.** Menus, loading screens and post effects (spectator mob views, entity outlines) are handled.
+  If the presenter ever fails, the game falls back to vanilla presentation automatically.
+- In-game settings screen (also via Mod Menu), hotkeys, and an optional stats line.
+
+## Requirements
+
+| | |
+|---|---|
+| Minecraft | 26.3 |
+| Fabric Loader | ≥ 0.20.1 |
+| Fabric API | required |
+| Java | 25 |
+| Graphics API | **OpenGL** (the default). Vulkan isn't supported yet; FrameGen turns itself off and says so in the stats line and settings screen. |
+| Mod Menu | optional |
+
+## Install
+
+1. Install Fabric Loader for 26.3 and Fabric API.
+2. Drop `framegen-<version>.jar` into `.minecraft/mods`.
+3. Optional, for the best results: turn **V-Sync on**. The presenter then paces itself to the display. Leave
+   *Max Framerate* at "Unlimited"; FrameGen caps the real frame rate itself (see *Multiplier*).
+
+## Controls
+
+| Key | Action |
+|---|---|
+| `F8` | Toggle frame generation |
+| *(unbound)* | Switch Interpolate / Extrapolate |
+| *(unbound)* | Toggle the stats line |
+| *(unbound)* | Open the FrameGen settings |
+
+Rebind them under *Options → Controls → Key Binds → FrameGen*.
+
+## Settings
+
+| Option | What it does |
+|---|---|
+| Frame Generation | Master switch. When off, frames pass straight through. |
+| Mode | Interpolate (smoothest) or Extrapolate (lowest latency). |
+| Quality | Solver iterations per pixel and disocclusion background search. Low / Medium / High / Ultra. |
+| Multiplier | Caps the real frame rate to `output / multiplier` (2× by default). This leaves GPU time for the presenter and gives it evenly spaced input. "Game limit" uses your Max Framerate instead. |
+| Output FPS | Presentation rate when V-Sync is off ("Display" = refresh rate). |
+| Sharp HUD and Hand | Keeps HUD and hand out of the reprojection. Disable only if another mod's HUD looks wrong. |
+| Max Prediction | How far past the newest real frame the camera may be predicted. |
+| Low Latency Present | Waits for each present to complete. This gives lower latency and steadier pacing on most drivers. |
+| Show Stats | `FrameGen 144 fps (real 72) | Interpolate | delay 21 ms | present 0.3 ms` |
+| Debug View | Tints pixels the reprojection couldn't reconstruct confidently in magenta. |
+
+The settings are stored in `config/framegen.json`.
+
+## How it works
+
+```
+ render thread (Minecraft's GL context)                    presenter thread (shared GL context, owns the window)
+ ─────────────────────────────────────                    ─────────────────────────────────────────────────────
+ extract  → sample camera, timestamp
+ level    → [A] copy world color + depth into a frame slot,
+               clear color to transparent
+ hand     → renders onto transparent target
+          → [B] copy hand layer, put world back underneath
+ post fx  → [B2] if post effects/outlines drew over the
+               hand, bake everything into the world layer
+ GUI      → [C] clear to transparent; vignette + crosshair
+               are intercepted (they blend with the world)
+ present  → [D] compose hand+GUI into a premultiplied
+               overlay, rebuild the exact vanilla frame in
+               the main target, fence, publish ──────────────▶ ingest frames whose GPU fence has signalled
+                                                             playback clock picks the time to show
+                                                             (interp: render latency + 1 frame in the past)
+                                                             pose = slerp/lerp between the bracketing frames
+                                                             warp both frames into that pose (depth-aware),
+                                                             blend by confidence + time, × vignette,
+                                                             + overlay, replay crosshair (invert blend)
+                                                             swap (V-Sync)  →  release slots with fences
+```
+
+- Minecraft 26.3 renders through the new `renderpearl` abstraction and SDL3. FrameGen replaces the window surface on
+  the OpenGL backend. Minecraft's context stays on its hidden utility window and only ever renders offscreen, and a
+  second context in the same share group is current on the visible window in the presenter thread. Frames are
+  handed over through a lock-protected exchange with GL fence objects in both directions, so neither thread ever
+  blocks on the other's GPU work.
+- Reprojection uses the full homogeneous transform
+  `M = P_target · R_target · T(cam_source − cam_target) · (P_source · R_source)⁻¹`, built in double precision. Sky
+  pixels (cleared reversed-Z depth) use the rotation-only variant, so they behave as if infinitely far away.
+- Window-space depth is affine across planes, so depth is interpolated bilinearly within surfaces (exact on
+  Minecraft's flat faces) and by nearest texel across discontinuities.
+
+### Measured reprojection accuracy
+
+The dev build has a self-test (`-Dframegen.debug=true`). It reprojects real frame *A* into the exact camera of the
+next real frame *B* and compares the result with *B*:
+
+| Camera motion between frames | Reprojected vs. B | Reusing A vs. B | Confidently reconstructed |
+|---|---|---|---|
+| 9° turn | 33.5 dB | 21.4 dB | 89% of pixels at 40.8 dB |
+| 15.6° turn | 33.0 dB | 21.4 dB | 87.5% at 44.8 dB |
+| 0.83 blocks strafe | 26.1 dB | 19.9 dB | 62.8% at 34.6 dB |
+
+The remaining pixels are newly revealed screen edges and disoccluded areas. These numbers come from a software
+renderer running at only 2–6 real fps, so the motion between frames was 5–10× larger than in normal play. The
+depth decoding was also checked against Minecraft's own crosshair raycast (1.620 vs 1.620 blocks).
+
+## Limitations
+
+- **OpenGL only.** On the Vulkan backend FrameGen stays inactive.
+- Entities, particles and animated textures update at the real frame rate. Without motion vectors only the camera
+  is reconstructed between real frames. In interpolation mode, conflicting pixels snap to the nearer real frame
+  instead of ghosting.
+- The edges of the screen that just came into view have no source data and are filled by edge stretching. This is
+  hard to notice at normal frame rates.
+- Shader packs and mods that replace the world renderer or the window surface (Iris and the like) are untested.
+
+## Testing status
+
+Everything above was developed and verified on Linux/X11, on Mesa's llvmpipe software renderer under Xvfb. That
+covers the presenter thread, shared contexts, passthrough and generation, HUD/hand layering, F2 screenshots, menus,
+toggling, mode switching and clean shutdown. It has **not yet been run on real GPU drivers** (NVIDIA / AMD / Intel)
+or on Windows, macOS or Wayland. The design relies only on standard shared-context OpenGL 3.3 and SDL3, but
+driver-specific issues are possible. If you hit one, the game falls back to vanilla presentation;
+`-Dframegen.disable=true` turns the mod off entirely.
+
+## Building
+
+```sh
+./gradlew build            # → build/libs/framegen-<version>.jar  (needs JDK 25)
+./gradlew runClient        # dev client (adds -Dframegen.debug=true: presenter stats + self-test in the log)
+```
+
+Useful JVM flags:
+
+- `-Dframegen.disable=true`: don't install the presenter at all (vanilla presentation).
+- `-Dframegen.debug=true`: log presenter statistics and run the reprojection self-test every few seconds.
+
+## License
+
+MIT
