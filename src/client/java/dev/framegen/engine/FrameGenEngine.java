@@ -7,7 +7,11 @@ import dev.framegen.FrameGenConfig;
 import dev.framegen.FrameGenMod;
 import java.util.function.BooleanSupplier;
 import org.jspecify.annotations.Nullable;
+import java.nio.IntBuffer;
+import org.lwjgl.opengl.GL11C;
+import org.lwjgl.opengl.GL30C;
 import org.lwjgl.sdl.SDLError;
+import org.lwjgl.system.MemoryStack;
 import org.lwjgl.sdl.SDLVideo;
 import org.lwjgl.sdl.SDL_DisplayMode;
 
@@ -59,9 +63,17 @@ public final class FrameGenEngine {
 
 		// A second context in Minecraft's share group, created for the visible window. It will be current on the
 		// presenter thread; Minecraft's own context stays bound to its hidden utility window and renders offscreen.
+		//
+		// Contexts can only share objects if their KHR_no_error state matches. Sodium turns that on for Minecraft's
+		// context by default on supported drivers, so mirror whatever Minecraft's context actually has instead of
+		// relying on SDL's attribute state.
+		boolean noError = (GL11C.glGetInteger(GL30C.GL_CONTEXT_FLAGS) & GL_CONTEXT_FLAG_NO_ERROR_BIT) != 0;
+		int previousNoError = getSdlAttribute(SDLVideo.SDL_GL_CONTEXT_NO_ERROR);
+		SDLVideo.SDL_GL_SetAttribute(SDLVideo.SDL_GL_CONTEXT_NO_ERROR, noError ? 1 : 0);
 		SDLVideo.SDL_GL_SetAttribute(SDLVideo.SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 1);
 		long presenterContext = SDLVideo.SDL_GL_CreateContext(windowHandle);
 		SDLVideo.SDL_GL_SetAttribute(SDLVideo.SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 0);
+		SDLVideo.SDL_GL_SetAttribute(SDLVideo.SDL_GL_CONTEXT_NO_ERROR, previousNoError);
 		String createError = presenterContext == 0L ? SDLError.SDL_GetError() : null;
 		if (!SDLVideo.SDL_GL_MakeCurrent(mcWindow, mcContext)) {
 			// Should never happen; if it does the game can't continue on this thread anyway.
@@ -87,6 +99,15 @@ public final class FrameGenEngine {
 		pollDisplay(true);
 		FrameGenMod.LOGGER.info("FrameGen active on {} ({}), presenting on a dedicated thread", info.name(), info.vendorName());
 		return surface;
+	}
+
+	private static final int GL_CONTEXT_FLAG_NO_ERROR_BIT = 0x00000008;
+
+	private static int getSdlAttribute(int attribute) {
+		try (MemoryStack stack = MemoryStack.stackPush()) {
+			IntBuffer value = stack.mallocInt(1);
+			return SDLVideo.SDL_GL_GetAttribute(attribute, value) ? value.get(0) : 0;
+		}
 	}
 
 	private static GpuSurface fail(GpuSurface vanilla, String reason) {

@@ -42,6 +42,7 @@ presenter (own thread)    ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ �
 | Java | 25 |
 | Graphics API | **OpenGL** (the default). Vulkan isn't supported yet; FrameGen turns itself off and says so in the stats line and settings screen. |
 | Mod Menu | optional |
+| Sodium / Nvidium | optional, supported (see below) |
 
 ## Install
 
@@ -130,6 +131,35 @@ The remaining pixels are newly revealed screen edges and disoccluded areas. Thes
 renderer running at only 2–6 real fps, so the motion between frames was 5–10× larger than in normal play. The
 depth decoding was also checked against Minecraft's own crosshair raycast (1.620 vs 1.620 blocks).
 
+## Sodium and Nvidium
+
+FrameGen is compatible with **Sodium 0.9.3+ for 26.3** and **Nvidium 0.4.4 for 26.3**:
+
+- **Settings in Sodium's menu.** With Sodium installed, *Video Settings* gets a **FrameGen** page next to Sodium's
+  and Nvidium's own pages. The tooltip on *Frame Generation* shows live status. FrameGen's own screen (Mod Menu /
+  keybind) keeps working too, and both edit the same `config/framegen.json`.
+- **Sodium's driver checks still run.** Sodium hooks `GlSurface.present` for its one-time driver checks and its
+  injected-overlay detection. FrameGen's presenter replaces that call, so FrameGen finds every mod's
+  `GlSurface.present` injection and replays it on the render thread for each presented frame. It reads the
+  injection target from the mixin's own bytecode, never by guessing names.
+- **No-error GL contexts.** Sodium makes Minecraft's context a `KHR_no_error` context on supported drivers. GL only
+  allows sharing between contexts whose no-error state matches, so FrameGen reads Minecraft's actual context flags
+  and creates the presenter context to match.
+- **Sodium / Nvidium terrain is reprojected exactly like vanilla terrain.** Both draw into Minecraft's main
+  framebuffer with the vanilla reversed-Z convention and the same projection matrix FrameGen captures. Nvidium
+  draws with `GL_GEQUAL` mesh-shader passes using Sodium's copy of that matrix. Nvidium's raw GL state changes stay
+  in Minecraft's context and never reach the presenter's.
+
+Verified in the dev environment with Sodium 0.9.3 + Nvidium 0.4.4-beta8:
+- Everything loads together with no mixin conflicts.
+- The FrameGen page appears in Sodium's settings and applies changes.
+- Sodium's checks run.
+- Generation works on Sodium's terrain renderer: an 11.4° turn reconstructs 90.4% of pixels at 46.9 dB.
+- The presenter shares correctly with a forced no-error context.
+
+Nvidium only enables itself on NVIDIA GPUs with mesh shaders. The test machine has none, so there Nvidium stayed
+disabled; its rendering path was checked by code review, not by running it.
+
 ## Limitations
 
 - **OpenGL only.** On the Vulkan backend FrameGen stays inactive.
@@ -138,7 +168,8 @@ depth decoding was also checked against Minecraft's own crosshair raycast (1.620
   instead of ghosting.
 - The edges of the screen that just came into view have no source data and are filled by edge stretching. This is
   hard to notice at normal frame rates.
-- Shader packs and mods that replace the world renderer or the window surface (Iris and the like) are untested.
+- Shader packs (Iris) and other mods that replace the window surface are untested. Sodium and Nvidium are
+  supported (see above).
 
 ## Testing status
 

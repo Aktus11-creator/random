@@ -5,6 +5,11 @@ plugins {
 
 repositories {
 	maven {
+		name = "Modrinth"
+		url = "https://api.modrinth.com/maven"
+		content { includeGroup "maven.modrinth" }
+	}
+	maven {
 		name = "TerraformersMC"
 		url = "https://maven.terraformersmc.com/releases/"
 		content { includeGroup "com.terraformersmc" }
@@ -42,6 +47,12 @@ dependencies {
 	// Optional: adds a config button to Mod Menu when it is installed.
 	compileOnly "com.terraformersmc:modmenu:${project.modmenu_version}"
 	localRuntime "com.terraformersmc:modmenu:${project.modmenu_version}"
+
+	// Optional: FrameGen adds its settings page to Sodium's video settings and replays Sodium's driver checks.
+	// Sodium + Nvidium are also loaded in the dev client to test compatibility.
+	compileOnly "maven.modrinth:sodium:${project.sodium_version}"
+	localRuntime "maven.modrinth:sodium:${project.sodium_version}"
+	localRuntime "maven.modrinth:nvidium:${project.nvidium_version}"
 }
 
 processResources {

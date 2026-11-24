@@ -10,7 +10,8 @@
 	"environment": "client",
 	"entrypoints": {
 		"client": ["dev.framegen.FrameGenMod"],
-		"modmenu": ["dev.framegen.compat.ModMenuIntegration"]
+		"modmenu": ["dev.framegen.compat.ModMenuIntegration"],
+		"sodium:config_api_user": ["dev.framegen.compat.SodiumConfigEntry"]
 	},
 	"mixins": [
 		{ "config": "framegen.mixins.json", "environment": "client" }
@@ -22,6 +23,8 @@
 		"fabric-api": "*"
 	},
 	"suggests": {
-		"modmenu": "*"
+		"modmenu": "*",
+		"sodium": ">=0.9.3",
+		"nvidium": "*"
 	}
 }

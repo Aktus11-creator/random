@@ -6,6 +6,7 @@ import com.mojang.renderpearl.api.device.SurfaceException;
 import com.mojang.renderpearl.api.textures.GpuTextureView;
 import dev.framegen.FrameGenConfig;
 import dev.framegen.FrameGenMod;
+import dev.framegen.compat.PresentHookReplayer;
 import java.util.Collection;
 import java.util.Optional;
 import java.util.function.BooleanSupplier;
@@ -30,6 +31,8 @@ final class FrameGenSurface implements GpuSurface {
 	private boolean blitted;
 	private boolean fallback;
 	private boolean closed;
+	/** Other mods' {@code GlSurface.present} injections, re-run here because the game no longer calls it. */
+	private final PresentHookReplayer presentHooks;
 
 	FrameGenSurface(GpuSurface vanilla, Presenter presenter, FrameExchange exchange, FrameCapture capture, long presenterContext, BooleanSupplier iconified) {
 		this.vanilla = vanilla;
@@ -38,6 +41,7 @@ final class FrameGenSurface implements GpuSurface {
 		this.capture = capture;
 		this.presenterContext = presenterContext;
 		this.iconified = iconified;
+		this.presentHooks = new PresentHookReplayer(vanilla);
 	}
 
 	boolean isPresenterActive() {
@@ -141,7 +145,9 @@ final class FrameGenSurface implements GpuSurface {
 		if (!this.blitted) {
 			return;
 		}
+		this.presentHooks.beforePresent();
 		FrameRecord record = this.capture.publish();
+		this.presentHooks.afterPresent();
 		if (record == null) return;
 
 		// Without generation the presenter shows each frame exactly once; emulate V-Sync's blocking swap so the game
