@@ -139,7 +139,7 @@ public final class SodiumConfigEntry implements ConfigEntryPoint {
 			.addOptionGroup(display);
 
 		builder.registerOwnModOptions()
-			.setIcon(Identifier.fromNamespaceAndPath(FrameGenMod.MOD_ID, "icon.png"))
+			.setNonTintedIcon(Identifier.fromNamespaceAndPath(FrameGenMod.MOD_ID, "icon.png"))
 			.setColorTheme(builder.createColorTheme().setBaseThemeRGB(0x78C8FF))
 			.addPage(page);
 	}

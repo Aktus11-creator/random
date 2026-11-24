@@ -1,4 +1,9 @@
+<p align="center"><img src="docs/banner.png" alt="FrameGen by Aktus1_1" width="730"></p>
+
 # FrameGen — frame generation for Minecraft 26.3 (Fabric)
+
+*By **Aktus1_1***
+
 
 FrameGen makes camera motion run at your monitor's refresh rate even when Minecraft renders far fewer real frames.
 It generates the in-between frames by **reprojecting** the last real frames, using their depth buffers and the exact
@@ -194,4 +199,4 @@ Useful JVM flags:
 
 ## License
 
-MIT
+MIT © 2026 Aktus1_1
