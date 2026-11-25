@@ -80,7 +80,7 @@ Rebind them under *Options → Controls → Key Binds → FrameGen*.
 | Real FPS Limit | **Display rate** (default) means the game never renders more real frames than your display shows. FrameGen only fills in when the game drops below that. *1/2 display* and lower trade real frames for GPU headroom; use them only if the game stutters. *Game limit* uses your Max Framerate. |
 | Output FPS | Presentation rate when V-Sync is off ("Display" = refresh rate). |
 | Sharp HUD and Hand | Keeps HUD and hand out of the reprojection. Disable only if another mod's HUD looks wrong. |
-| Max Prediction | How far past the newest real frame the camera may be predicted. |
+| Max Prediction | Extrapolate mode only: how far past the newest real frame the camera may be predicted, in real frames. It has no effect with Interpolate. |
 | Low Latency Present | Waits for each present to complete. This gives lower latency and steadier pacing on most drivers. |
 | Show Stats | `FrameGen 144 fps (real 72) | Interpolate | delay 21 ms | present 0.3 ms`, or `FrameGen native` when the game already keeps up. |
 | Debug View | Tints pixels the reprojection couldn't reconstruct confidently in magenta. |

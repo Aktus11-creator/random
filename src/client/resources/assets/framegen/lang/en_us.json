@@ -38,7 +38,7 @@
 	"framegen.option.sharp_hud": "Sharp HUD and Hand",
 	"framegen.option.sharp_hud.tooltip": "Keep the HUD and your first-person hand out of the reprojection so they never wobble or smear. Disable only if another mod draws HUD elements that look wrong.",
 	"framegen.option.extrapolation": "Max Prediction",
-	"framegen.option.extrapolation.tooltip": "How far ahead of the newest real frame the camera may be predicted (extrapolation mode, or when a frame arrives late).",
+	"framegen.option.extrapolation.tooltip": "Extrapolate mode only (no effect with Interpolate): how far ahead of the newest real frame the camera may be predicted, in real frames. Higher keeps motion flowing when frames are late but overshoots more when you stop turning; 0 disables prediction.",
 	"framegen.option.low_latency": "Low Latency Present",
 	"framegen.option.low_latency.tooltip": "Wait for each presented frame to reach the display before preparing the next one. Lower latency and better pacing on most drivers.",
 	"framegen.option.stats": "Show Stats",
