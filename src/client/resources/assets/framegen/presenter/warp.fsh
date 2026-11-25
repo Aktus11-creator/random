@@ -11,6 +11,11 @@
 //   s_{k+1} = Inv( t, depthInTarget( Fwd( s_k, depth_source(s_k) ) ) )
 // which converges in 1-2 steps on smooth surfaces. The final residual |Fwd(s) - t| tells us whether the source really
 // saw this point (small) or whether it is disoccluded / off-screen in that frame (large), and drives the blending.
+//
+// Moving objects: each source frame comes with a short list of entities (a box around each, relative to that frame's
+// camera, plus where the entity is at the generated moment: a translation and a turn about its vertical axis).
+// Points inside a box are moved with their entity before being projected into the target. The iteration then uses
+// the residual form s += Inv(t) - Inv(Fwd(s)), which reduces to the plain step for static points.
 
 uniform sampler2D uColorA;
 uniform sampler2D uDepthA;
@@ -28,6 +33,29 @@ uniform mat4 uFwdB;
 uniform mat4 uFwdRotB;
 uniform mat4 uInvB;
 uniform mat4 uInvRotB;
+
+// Source NDC -> point relative to the source camera (homogeneous), and that point -> target clip space.
+uniform mat4 uSrcInvA;
+uniform mat4 uTgtA;
+uniform mat4 uSrcInvB;
+uniform mat4 uTgtB;
+// Moving entities, frame A from index 0 and frame B from ENT_B. Six vec4 each: (centre x, centre z, min y, max y),
+// (facing x, facing z, half width, half length) of a box that turns with the body, translation, (turn angle, -, -, -),
+// the moved box's rectangle in target NDC, and how far the entity's centre moves on screen (target NDC) compared with
+// static scenery. Positions are relative to the source camera.
+#define MAX_ENT 32
+#define ENT_B (MAX_ENT * 6)
+layout(std140) uniform FrameGenEntities {
+    vec4 uEnt[2 * MAX_ENT * 6];
+};
+uniform int uEntCountA;
+uniform int uEntCountB;
+// Bounding rectangles of all moving boxes, in source NDC (before moving) and target NDC (after): quick rejects so that
+// pixels far from moving entities cost nothing extra.
+uniform vec4 uSrcRectA;
+uniform vec4 uSrcRectB;
+uniform vec4 uTgtRectA;
+uniform vec4 uTgtRectB;
 
 uniform vec2 uSizeA;      // source A size in texels
 uniform vec2 uSizeB;      // source B size in texels
@@ -99,32 +127,80 @@ vec4 forwardMap(mat4 fwd, mat4 fwdRot, vec2 s, float d) {
 struct Candidate {
     vec3 color;
     float err;
+    float z;     // target NDC depth of the reconstructed point (reversed-Z: larger = nearer)
+    bool moved;  // the point belongs to a moving entity
+    int movedId; // which one (index in the frame's entity list), -1 if none
 };
 
-Candidate reproject(sampler2D colorTex, sampler2D depthTex, vec2 size, mat4 fwd, mat4 fwdRot, mat4 inv, mat4 invRot, vec2 t) {
-    // Rotation-only inverse is independent of depth and is the best first guess for large camera turns.
-    vec4 g = invRot * vec4(t, 0.5, 1.0);
+// Like forwardMap, but moves points that lie inside an entity box with that entity.
+bool inRect(vec2 p, vec4 r) {
+    return all(greaterThanEqual(p, r.xy)) && all(lessThanEqual(p, r.zw));
+}
+
+vec4 forwardMapMoving(mat4 fwd, mat4 fwdRot, mat4 srcInv, mat4 tgt, int ents, int count, vec4 srcRect, vec2 s, float d, out bool moved, out int movedId) {
+    moved = false;
+    movedId = -1;
+    if (count == 0 || d <= 0.0 || !inRect(s, srcRect)) return forwardMap(fwd, fwdRot, s, d);
+    vec4 h = srcInv * vec4(s, toNdcZ(d), 1.0);
+    if (abs(h.w) < 1e-9) return forwardMap(fwd, fwdRot, s, d);
+    vec3 p = h.xyz / h.w;
+    for (int i = 0; i < count; i++) {
+        int e = ents + i * 6;
+        vec4 box = uEnt[e];
+        vec4 axes = uEnt[e + 1];
+        vec2 rel = p.xz - box.xy;
+        if (p.y >= box.z && p.y <= box.w && abs(dot(rel, axes.xy)) <= axes.w && abs(dot(rel, vec2(-axes.y, axes.x))) <= axes.z) {
+            vec3 move = uEnt[e + 2].xyz;
+            float angle = uEnt[e + 3].x;
+            float c = cos(angle);
+            float sn = sin(angle);
+            p.xz = box.xy + vec2(c * rel.x + sn * rel.y, -sn * rel.x + c * rel.y);
+            p += move;
+            moved = true;
+            movedId = i;
+            break;
+        }
+    }
+    return moved ? tgt * vec4(p, 1.0) : fwd * vec4(s, toNdcZ(d), 1.0);
+}
+
+Candidate reproject(sampler2D colorTex, sampler2D depthTex, vec2 size, mat4 fwd, mat4 fwdRot, mat4 inv, mat4 invRot,
+        mat4 srcInv, mat4 tgt, int ents, int entCount, vec4 srcRect, vec2 t, vec2 startShift, bool fill) {
+    // Rotation-only inverse is independent of depth and is the best first guess for large camera turns. For a moving
+    // object, start where the object was: shifted back by its own screen motion.
+    vec4 g = invRot * vec4(t - startShift, 0.5, 1.0);
     vec2 s0 = g.w > EPS_W ? g.xy / g.w : t;
     vec2 s = s0;
     float d = 0.0;
     float err = 1e4;
+    float zt = 0.0;
+    bool moved = false;
+    int movedId = -1;
     // Each step measures the residual of the current guess (that's the convergence check, for free) and stops as
     // soon as it is below a twentieth of a pixel; smooth surfaces converge in one or two steps.
     for (int i = 0; i <= uIterations; i++) {
         d = fetchDepth(depthTex, size, s);
-        vec4 p = forwardMap(fwd, fwdRot, s, d);
+        vec4 p = forwardMapMoving(fwd, fwdRot, srcInv, tgt, ents, entCount, srcRect, s, d, moved, movedId);
         if (p.w <= EPS_W) {
             err = 1e4;
             break;
         }
+        zt = p.z / p.w;
         err = length((p.xy / p.w - t) * uOutSize * 0.5);
         if (err < 0.05 || i == uIterations) break;
-        vec4 q = (d <= 0.0 ? invRot : inv) * vec4(t, p.z / p.w, 1.0);
+        vec4 q = (d <= 0.0 ? invRot : inv) * vec4(t, zt, 1.0);
         if (q.w <= EPS_W) break;
-        s = q.xy / q.w;
+        if (moved) {
+            // Residual step: the static inverse maps the target error back to a source correction.
+            vec4 q0 = inv * vec4(p.xy / p.w, zt, 1.0);
+            if (q0.w <= EPS_W) break;
+            s += q.xy / q.w - q0.xy / q0.w;
+        } else {
+            s = q.xy / q.w;
+        }
     }
 
-    if (uBackgroundSearch == 1 && err > ERR_GOOD) {
+    if (fill && uBackgroundSearch == 1 && err > ERR_GOOD) {
         // Disocclusion: the iteration got pulled onto a foreground edge. Probe along the search direction for the
         // farthest surface and reproject *that* depth: fills the hole with background instead of smearing the edge.
         vec2 dir = s - s0;
@@ -171,6 +247,9 @@ Candidate reproject(sampler2D colorTex, sampler2D depthTex, vec2 size, mat4 fwd,
     Candidate c;
     c.color = texture(colorTex, clamp(uv, half_texel, 1.0 - half_texel)).rgb;
     c.err = err;
+    c.z = zt;
+    c.moved = moved;
+    c.movedId = movedId;
     return c;
 }
 
@@ -178,34 +257,63 @@ float confidence(float err) {
     return 1.0 - smoothstep(ERR_GOOD, ERR_BAD, err);
 }
 
+// The solver starts from where static scenery would be, so it finds the ground a moving object is about to cover rather
+// than the object. Inside each moving entity's on-screen area, search again starting from the object, and keep the
+// object if it really lands here and is in front.
+Candidate reprojectAll(sampler2D colorTex, sampler2D depthTex, vec2 size, mat4 fwd, mat4 fwdRot, mat4 inv, mat4 invRot,
+        mat4 srcInv, mat4 tgt, int ents, int entCount, vec4 srcRect, vec4 tgtRect, vec2 t) {
+    Candidate c = reproject(colorTex, depthTex, size, fwd, fwdRot, inv, invRot, srcInv, tgt, ents, entCount, srcRect, t, vec2(0.0), true);
+    // Already on a moving object that really lands here: nothing to look for.
+    if (entCount == 0 || !inRect(t, tgtRect) || (c.moved && c.err < ERR_GOOD)) return c;
+    for (int i = 0; i < entCount; i++) {
+        if (!inRect(t, uEnt[ents + i * 6 + 4])) continue;
+        vec2 shift = uEnt[ents + i * 6 + 5].xy;
+        Candidate e = reproject(colorTex, depthTex, size, fwd, fwdRot, inv, invRot, srcInv, tgt, ents, entCount, srcRect, t, shift, false);
+        // Only this entity counts: a search started for one object can land on another one that is hidden behind it.
+        if (e.movedId == i && confidence(e.err) > 0.5 && (confidence(c.err) < 0.5 || e.z > c.z)) {
+            c = e;
+        }
+    }
+    return c;
+}
+
 void main() {
     vec2 t = vUv * 2.0 - 1.0;
 
     vec3 world;
     float shownErr;
+    bool shownMoved = false;
     if (uUseA == 1) {
         // Evaluate the temporally dominant frame first; the other one only if it carries real weight or the first
         // could not reconstruct this pixel (disocclusion fill). Halves the cost for most pixels near t = 0 or 1.
         bool aFirst = uWeightA >= 0.5;
         float wFirst = aFirst ? uWeightA : 1.0 - uWeightA;
         Candidate c1 = aFirst
-            ? reproject(uColorA, uDepthA, uSizeA, uFwdA, uFwdRotA, uInvA, uInvRotA, t)
-            : reproject(uColorB, uDepthB, uSizeB, uFwdB, uFwdRotB, uInvB, uInvRotB, t);
+            ? reprojectAll(uColorA, uDepthA, uSizeA, uFwdA, uFwdRotA, uInvA, uInvRotA, uSrcInvA, uTgtA, 0, uEntCountA, uSrcRectA, uTgtRectA, t)
+            : reprojectAll(uColorB, uDepthB, uSizeB, uFwdB, uFwdRotB, uInvB, uInvRotB, uSrcInvB, uTgtB, ENT_B, uEntCountB, uSrcRectB, uTgtRectB, t);
         float conf1 = confidence(c1.err);
         world = c1.color;
         shownErr = c1.err;
-        if (1.0 - wFirst > 0.02 || conf1 < 0.999) {
+        shownMoved = c1.moved;
+        // Near moving objects both frames are always consulted: one of them may hold the object, the other what's
+        // behind it.
+        bool nearMoving = (uEntCountA > 0 && inRect(t, uTgtRectA)) || (uEntCountB > 0 && inRect(t, uTgtRectB));
+        if (1.0 - wFirst > 0.02 || conf1 < 0.999 || nearMoving) {
             Candidate c2 = aFirst
-                ? reproject(uColorB, uDepthB, uSizeB, uFwdB, uFwdRotB, uInvB, uInvRotB, t)
-                : reproject(uColorA, uDepthA, uSizeA, uFwdA, uFwdRotA, uInvA, uInvRotA, t);
+                ? reprojectAll(uColorB, uDepthB, uSizeB, uFwdB, uFwdRotB, uInvB, uInvRotB, uSrcInvB, uTgtB, ENT_B, uEntCountB, uSrcRectB, uTgtRectB, t)
+                : reprojectAll(uColorA, uDepthA, uSizeA, uFwdA, uFwdRotA, uInvA, uInvRotA, uSrcInvA, uTgtA, 0, uEntCountA, uSrcRectA, uTgtRectA, t);
             float conf2 = confidence(c2.err);
             float w1 = wFirst * conf1;
             float w2 = (1.0 - wFirst) * conf2;
-            // Things that moved on their own (mobs, particles, animated textures) disagree between the two frames
-            // even where the reprojection is perfect. Cross-fading would show two half-transparent copies, so snap
-            // to the temporally nearer frame (c1) instead.
             vec3 diff = abs(c1.color - c2.color);
-            if (max(diff.r, max(diff.g, diff.b)) > 0.12) {
+            bool conflict = max(diff.r, max(diff.g, diff.b)) > 0.12;
+            if ((c1.moved || c2.moved) && conf1 > 0.5 && conf2 > 0.5 && abs(c1.z - c2.z) > 0.02 * max(c1.z, c2.z)) {
+                // Two valid points land here: a moving object and what is behind it. The nearer one is visible.
+                if (c1.z > c2.z) w2 = 0.0; else w1 = 0.0;
+            } else if (conflict) {
+                // Things that changed on their own (animations, particles, objects we can't track) disagree between
+                // the two frames even where the reprojection is perfect. Cross-fading would show two half-transparent
+                // copies, so snap to the temporally nearer frame (c1) instead.
                 w2 *= 0.02;
             }
             float sum = w1 + w2;
@@ -216,16 +324,19 @@ void main() {
                 world = c1.err <= c2.err ? c1.color : c2.color;
             }
             shownErr = min(c1.err, c2.err);
+            shownMoved = w1 >= w2 ? c1.moved : c2.moved;
         }
     } else {
-        Candidate cb = reproject(uColorB, uDepthB, uSizeB, uFwdB, uFwdRotB, uInvB, uInvRotB, t);
+        Candidate cb = reprojectAll(uColorB, uDepthB, uSizeB, uFwdB, uFwdRotB, uInvB, uInvRotB, uSrcInvB, uTgtB, ENT_B, uEntCountB, uSrcRectB, uTgtRectB, t);
         world = cb.color;
         shownErr = cb.err;
+        shownMoved = cb.moved;
     }
 
     if (uDebug == 1) {
         float c = confidence(shownErr);
         world = mix(world, vec3(1.0, 0.0, 1.0), 0.6 * (1.0 - c));
+        if (shownMoved) world = mix(world, vec3(0.0, 0.3, 1.0), 0.4);
     }
 
     vec3 vignette = vec3(1.0);

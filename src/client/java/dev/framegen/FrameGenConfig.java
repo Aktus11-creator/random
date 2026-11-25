@@ -62,6 +62,8 @@ public final class FrameGenConfig {
 	 * roughly (1 + 2 * overscan / 100)^2 times the world's pixel count.
 	 */
 	public volatile int overscan = 8;
+	/** Move the pixels of mobs, players, items etc. with them in generated frames (instead of only the camera). */
+	public volatile boolean movingObjects = true;
 	/** Wait for the GPU after every present. Lowers latency and improves pacing on most drivers. */
 	public volatile boolean lowLatencyPresent = true;
 	/** Show the frame generation statistics line in the HUD. */

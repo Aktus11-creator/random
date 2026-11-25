@@ -28,6 +28,8 @@ presenter (own thread)    ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ �
     especially at low frame rates, and adds about one real frame of latency.
   - *Extrapolate*: predicts forward from the newest frame. It adds no latency but is less smooth at low frame
     rates and can briefly overshoot when you stop turning.
+- **Smooth mobs, players and items.** Moving entities are moved with their own motion in generated frames (walking,
+  flying, riding, turning), not just the camera.
 - **No stretched screen edges.** The world is rendered with a small margin around the screen (*overscan*), so
   when you turn, the edge that comes into view is real scenery instead of stretched edge pixels. Real frames are
   cropped back to the normal view.
@@ -83,11 +85,12 @@ Rebind them under *Options → Controls → Key Binds → FrameGen*.
 | Real FPS Limit | **Display rate** (default) means the game never renders more real frames than your display shows. FrameGen only fills in when the game drops below that. *1/2 display* and lower trade real frames for GPU headroom; use them only if the game stutters. *Game limit* uses your Max Framerate. |
 | Output FPS | Presentation rate when V-Sync is off ("Display" = refresh rate). |
 | Overscan | Extra field of view rendered around the screen, per side: Off / 4% / **8%** (default) / … / 24%. Generated frames use it for screen edges coming into view while you turn. Real frames look the same. Costs GPU time: 8% renders about 35% more world pixels. Skipped automatically while post effects or glowing entities are on screen. |
+| Smooth Moving Objects | Moves mobs, players, items, minecarts and boats in generated frames (on by default). Limb animations still update at the real frame rate. |
 | Sharp HUD and Hand | Keeps HUD and hand out of the reprojection. Disable only if another mod's HUD looks wrong. |
 | Max Prediction | Extrapolate mode only: how far past the newest real frame the camera may be predicted, in real frames. It has no effect with Interpolate. |
 | Low Latency Present | Waits for each present to complete. This gives lower latency and steadier pacing on most drivers. |
 | Show Stats | `FrameGen 144 fps (real 72) | Interpolate | delay 21 ms | present 0.3 ms`, or `FrameGen native` when the game already keeps up. |
-| Debug View | Tints pixels the reprojection couldn't reconstruct confidently in magenta. |
+| Debug View | Tints pixels the reprojection couldn't reconstruct confidently in magenta, and pixels moved with an entity in blue. |
 
 The settings are stored in `config/framegen.json`.
 
@@ -132,6 +135,13 @@ The settings are stored in `config/framegen.json`.
   that is `W × H` instead of `w × h`. The centre `w × h` pixels are then exactly the normal image (pixel centres
   line up), and the culling frustum is widened to match. The presenter reads source frames with this wider
   projection and produces output with the normal one.
+- Moving entities: each real frame records every rendered entity's id, position, velocity and body yaw, plus a box
+  around it that turns with the body. For a generated frame, the presenter places each entity where it is at that
+  moment (interpolated between the two real frames, or by its velocity) and the shader moves every source pixel
+  inside the box with it (translation plus the body turn). Because the solver normally starts from where static
+  scenery would be, pixels in an entity's on-screen area also get a second search starting from the entity, and of
+  two valid answers the nearer one wins. Entities that jump or turn too far between two real frames fall back to
+  the old behaviour (the nearer real frame is shown).
 - Window-space depth is affine across planes, so depth is interpolated bilinearly within surfaces (exact on
   Minecraft's flat faces) and by nearest texel across discontinuities.
 
@@ -180,6 +190,15 @@ Nvidium only enables itself on NVIDIA GPUs with mesh shaders. The test machine h
 disabled; its rendering path was checked by code review, not by running it.
 
 ## Changelog
+
+**1.6.0**
+- **Mobs, players, items, minecarts and boats now move smoothly** in generated frames, not just the camera.
+  Before, anything that moved on its own only moved on real frames. New *Smooth Moving Objects* setting (on by
+  default).
+- Walking, flying, riding and turning are smoothed. Limb animations (legs swinging) and particles still update at
+  the real frame rate.
+- Works with entity model mods (EMF/ETF, 3D Skin Layers, player animations): FrameGen uses each entity's position
+  and hitbox, not its model.
 
 **1.5.0**
 - **No more stretched screen edges when you turn fast.** FrameGen now renders a little more of the world than
@@ -255,9 +274,9 @@ disabled; its rendering path was checked by code review, not by running it.
 ## Limitations
 
 - **OpenGL only.** On the Vulkan backend FrameGen stays inactive.
-- Entities, particles and animated textures update at the real frame rate. Without motion vectors only the camera
-  is reconstructed between real frames. In interpolation mode, conflicting pixels snap to the nearer real frame
-  instead of ghosting.
+- Entities move with their position and body turn; limb animations, head turns, particles and animated textures
+  update at the real frame rate. Parts of a model that stick far out of its hitbox may not move with it. In
+  interpolation mode, conflicting pixels snap to the nearer real frame instead of ghosting.
 - Screen edges that come into view are taken from the overscan margin. A turn larger than the margin between two
   real frames (or overscan off) still shows some edge stretching. Overscan sits out frames with post effects
   (e.g. spectating a creeper) or glowing entities on screen.

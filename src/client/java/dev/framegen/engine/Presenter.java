@@ -95,6 +95,21 @@ public final class Presenter implements Runnable {
 	private final Matrix4f fwdRot = new Matrix4f();
 	private final Matrix4f inv = new Matrix4f();
 	private final Matrix4f invRot = new Matrix4f();
+	private final Matrix4f srcInv = new Matrix4f();
+	private final Matrix4f tgt = new Matrix4f();
+	/** Moving entities of the two source frames: a uniform buffer, {@link #ENTITY_VEC4S} vec4 per entity (see warp.fsh). */
+	private static final int ENTITY_VEC4S = 6;
+	private static final int MAX_MOVING = 32;
+	private final org.joml.Vector4f tmpV = new org.joml.Vector4f();
+	private final Matrix4f srcVp = new Matrix4f();
+	/** Union rectangles of the last {@link #uploadMotion}: x0, y0, x1, y1 in source NDC and in target NDC. */
+	private final float[] motionSrcRect = new float[4];
+	private final float[] motionTgtRect = new float[4];
+	/** A small ring, so the buffer being written was last read several frames ago (no waiting on the GPU). */
+	private final int[] entUbos = new int[4];
+	private int entUboIndex;
+	private java.nio.@Nullable FloatBuffer entBuf;
+	private volatile int statMovingEntities;
 
 	Presenter(FrameExchange exchange, long window, long context, BooleanSupplier iconified) {
 		this.exchange = exchange;
@@ -245,6 +260,7 @@ public final class Presenter implements Runnable {
 		this.warp.setInt("uDepthB", 3);
 		this.warp.setInt("uOverlay", 4);
 		this.warp.setInt("uVignetteTex", 5);
+		this.warp.bindUniformBlock("FrameGenEntities", 0);
 		this.passthrough.use();
 		this.passthrough.setInt("uOverlay", 4);
 		this.compose.use();
@@ -255,6 +271,13 @@ public final class Presenter implements Runnable {
 		this.invertQuad.setInt("uTexture", 6);
 		GL33C.glUseProgram(0);
 
+		GL33C.glGenBuffers(this.entUbos);
+		for (int ubo : this.entUbos) {
+			GL33C.glBindBuffer(GL33C.GL_UNIFORM_BUFFER, ubo);
+			GL33C.glBufferData(GL33C.GL_UNIFORM_BUFFER, 2L * MAX_MOVING * ENTITY_VEC4S * 16, GL33C.GL_DYNAMIC_DRAW);
+		}
+		GL33C.glBindBuffer(GL33C.GL_UNIFORM_BUFFER, 0);
+		this.entBuf = org.lwjgl.system.MemoryUtil.memAllocFloat(2 * 4 * ENTITY_VEC4S * MAX_MOVING);
 		this.vao = GL33C.glGenVertexArrays();
 		this.linearSampler = GL33C.glGenSamplers();
 		configureSampler(this.linearSampler, GL33C.GL_LINEAR);
@@ -301,6 +324,9 @@ public final class Presenter implements Runnable {
 			if (this.compose != null) this.compose.close();
 			if (this.invertQuad != null) this.invertQuad.close();
 			if (this.vao != 0) GL33C.glDeleteVertexArrays(this.vao);
+			if (this.entUbos[0] != 0) GL33C.glDeleteBuffers(this.entUbos);
+			if (this.entBuf != null) org.lwjgl.system.MemoryUtil.memFree(this.entBuf);
+			this.entBuf = null;
 			if (this.testFbo != 0) GL33C.glDeleteFramebuffers(this.testFbo);
 			if (this.testTexture != 0) GL33C.glDeleteTextures(this.testTexture);
 			if (this.testBlank != 0) GL33C.glDeleteTextures(this.testBlank);
@@ -474,6 +500,10 @@ public final class Presenter implements Runnable {
 			&& prevWorld.world.width == r.world.width && prevWorld.world.height == r.world.height) {
 			this.lastSelfTest = r.readyNanos;
 			this.selfTest(prevWorld, r);
+			FrameRecord older = this.olderWorld(prevWorld);
+			if (older != null && !prevWorld.cut && older.world.width == r.world.width && older.world.height == r.world.height) {
+				this.interpolationTest(older, prevWorld, r);
+			}
 		}
 		this.history.add(r);
 		// Keep the three newest world frames (interpolation needs to bracket the display time) plus the newest record.
@@ -590,7 +620,7 @@ public final class Presenter implements Runnable {
 			// Display time is older than everything we have: show the oldest frame as is.
 			FrameRecord only = worlds.getFirst();
 			this.target.set(only);
-			this.drawWarp(config, null, only, 0.0, w, h);
+			this.drawWarp(config, null, only, 0.0, w, h, null, Double.NaN, 0.0);
 			return;
 		}
 		if (b == null) {
@@ -600,7 +630,7 @@ public final class Presenter implements Runnable {
 				a = worlds.get(worlds.size() - 2);
 			} else {
 				this.target.set(newest);
-				this.drawWarp(config, null, newest, 0.0, w, h);
+				this.drawWarp(config, null, newest, 0.0, w, h, null, Double.NaN, 0.0);
 				return;
 			}
 		}
@@ -608,7 +638,7 @@ public final class Presenter implements Runnable {
 			// Never blend across a teleport/respawn: hold A until B is due, then switch.
 			FrameRecord only = displaySim < b.simNanos ? a : b;
 			this.target.set(only);
-			this.drawWarp(config, null, only, 0.0, w, h);
+			this.drawWarp(config, null, only, 0.0, w, h, null, Double.NaN, 0.0);
 			return;
 		}
 
@@ -621,7 +651,7 @@ public final class Presenter implements Runnable {
 		this.poseB.set(b);
 		this.target.blend(this.poseA, this.poseB, t);
 		boolean useA = t < 1.0 || config.quality.backgroundSearch;
-		this.drawWarp(config, useA ? a : null, b, Math.max(0.0, 1.0 - t), w, h);
+		this.drawWarp(config, useA ? a : null, b, Math.max(0.0, 1.0 - t), w, h, a, t, displaySim);
 	}
 
 	/**
@@ -667,9 +697,12 @@ public final class Presenter implements Runnable {
 
 	/**
 	 * Draws the world reprojected into {@link #target} from frame {@code b} (and {@code a} if given, with temporal
-	 * weight {@code weightA}), the vignette and the overlay of the newest frame.
+	 * weight {@code weightA}), the vignette and the overlay of the newest frame. Moving entities are placed where they
+	 * are at blend factor {@code u} between {@code pairA} and {@code b} (NaN: no entity motion), or, for entities only
+	 * one frame has, where their velocity takes them at {@code targetSim}.
 	 */
-	private void drawWarp(FrameGenConfig config, @Nullable FrameRecord a, FrameRecord b, double weightA, int w, int h) {
+	private void drawWarp(FrameGenConfig config, @Nullable FrameRecord a, FrameRecord b, double weightA, int w, int h,
+		@Nullable FrameRecord pairA, double u, double targetSim) {
 		FrameRecord overlay = this.history.getLast();
 		GlProgram p = this.warp;
 		p.use();
@@ -683,6 +716,14 @@ public final class Presenter implements Runnable {
 		p.setVec2("uSizeB", b.world.width, b.world.height);
 		bindTexture(2, b.world.glColor, this.linearSampler);
 		bindTexture(3, b.world.glDepth, this.nearestSampler);
+		boolean motion = config.movingObjects && !Double.isNaN(u);
+		this.target.motionMatrices(this.poseB, this.srcInv, this.tgt);
+		p.setMat4("uSrcInvB", this.srcInv);
+		p.setMat4("uTgtB", this.tgt);
+		int movingB = motion ? this.uploadMotion(1, b, pairA != b ? pairA : null, false, u, targetSim) : 0;
+		p.setInt("uEntCountB", movingB);
+		this.setMotionRects(p, "B", movingB);
+		int movingA = 0;
 
 		if (a != null) {
 			this.poseA.set(a);
@@ -691,6 +732,11 @@ public final class Presenter implements Runnable {
 			p.setMat4("uFwdRotA", this.fwdRot);
 			p.setMat4("uInvA", this.inv);
 			p.setMat4("uInvRotA", this.invRot);
+			this.target.motionMatrices(this.poseA, this.srcInv, this.tgt);
+			p.setMat4("uSrcInvA", this.srcInv);
+			p.setMat4("uTgtA", this.tgt);
+			movingA = motion ? this.uploadMotion(0, a, b, true, u, targetSim) : 0;
+			this.setMotionRects(p, "A", movingA);
 			p.setVec2("uSizeA", a.world.width, a.world.height);
 			bindTexture(0, a.world.glColor, this.linearSampler);
 			bindTexture(1, a.world.glDepth, this.nearestSampler);
@@ -698,14 +744,26 @@ public final class Presenter implements Runnable {
 			bindTexture(0, b.world.glColor, this.linearSampler);
 			bindTexture(1, b.world.glDepth, this.nearestSampler);
 		}
+		p.setInt("uEntCountA", movingA);
+		this.statMovingEntities = Math.max(movingA, movingB);
+		if (movingA + movingB > 0) this.flushMotion();
+		GL33C.glBindBufferBase(GL33C.GL_UNIFORM_BUFFER, 0, this.entUbos[this.entUboIndex]);
 		p.setInt("uUseA", a != null ? 1 : 0);
 		p.setFloat("uWeightA", (float) weightA);
 		p.setVec2("uOutSize", w, h);
 		p.setInt("uIterations", config.quality.iterations);
 		p.setInt("uBackgroundSearch", config.quality.backgroundSearch ? 1 : 0);
 		p.setInt("uZeroToOne", b.zZeroToOne ? 1 : 0);
-		p.setInt("uDebug", config.debugView ? 1 : 0);
+		p.setInt("uDebug", config.debugView && !this.testDraw ? 1 : 0);
 
+		if (this.testDraw) {
+			// Self-test: the world only, no HUD, no vignette.
+			p.setInt("uVignette", 0);
+			bindTexture(5, this.testBlank, this.linearSampler);
+			bindTexture(4, this.testBlank, this.linearSampler);
+			GL33C.glDrawArrays(GL33C.GL_TRIANGLES, 0, 3);
+			return;
+		}
 		if (overlay.vignette && overlay.vignetteTexture != 0) {
 			p.setInt("uVignette", 1);
 			p.setVec3("uVignetteColor", overlay.vignetteR, overlay.vignetteG, overlay.vignetteB);
@@ -716,6 +774,177 @@ public final class Presenter implements Runnable {
 		}
 		bindTexture(4, overlay.overlay.glColor, this.linearSampler);
 		GL33C.glDrawArrays(GL33C.GL_TRIANGLES, 0, 3);
+	}
+
+	/**
+	 * Writes the entities of {@code src} that move between {@code src} and the generated moment into entity slot
+	 * {@code slot} (0 = frame A, 1 = frame B) and
+	 * returns their number. Entities that {@code other} (the other frame of the pair) also has are placed by
+	 * interpolating between the two frames, exactly like the camera; the rest by their velocity. {@link #tgt} must hold
+	 * the target matrix for {@code src} ({@link Pose#motionMatrices}).
+	 */
+	private int uploadMotion(int slot, FrameRecord src, @Nullable FrameRecord other, boolean srcIsA, double u, double targetSim) {
+		java.nio.FloatBuffer buf = this.entBuf;
+		if (src.entityCount == 0 || buf == null) return 0;
+		buf.limit(buf.capacity()).position(slot * 4 * ENTITY_VEC4S * MAX_MOVING);
+		this.srcInv.invert(this.srcVp);
+		float[] sr = this.motionSrcRect;
+		float[] tr = this.motionTgtRect;
+		sr[0] = sr[1] = tr[0] = tr[1] = Float.MAX_VALUE;
+		sr[2] = sr[3] = tr[2] = tr[3] = -Float.MAX_VALUE;
+		double dt = Math.max(-0.25, Math.min(0.25, (targetSim - src.simNanos) / 1e9));
+		int n = 0;
+		for (int i = 0; i < src.entityCount && n < MAX_MOVING; i++) {
+			double tx;
+			double ty;
+			double tz;
+			double turnDeg = 0.0;
+			int j = other != null ? other.findEntity(src.entityIds[i]) : -1;
+			if (j >= 0) {
+				// Displacement from frame A to frame B; this frame's share of it up to the generated moment.
+				double sign = srcIsA ? 1.0 : -1.0;
+				double dx = (other.entityPos[j * 3] - src.entityPos[i * 3]) * sign;
+				double dy = (other.entityPos[j * 3 + 1] - src.entityPos[i * 3 + 1]) * sign;
+				double dz = (other.entityPos[j * 3 + 2] - src.entityPos[i * 3 + 2]) * sign;
+				// Moving more than about half its own size, or turning more than 25 degrees, between two real frames is
+				// too much to reconstruct cleanly (parts of the model leave the box, the search can't follow the turn).
+				// Showing the nearer real frame, as for static objects, looks better then.
+				double limit = Math.max(0.5, 1.2 * src.entityBox[i * FrameRecord.BOX_FLOATS + 6]);
+				if (dx * dx + dy * dy + dz * dz > limit * limit) continue;
+				double share = srcIsA ? u : u - 1.0;
+				tx = dx * share;
+				ty = dy * share;
+				tz = dz * share;
+				float yawSrc = src.entityYaw[i];
+				float yawOther = other.entityYaw[j];
+				if (!Float.isNaN(yawSrc) && !Float.isNaN(yawOther)) {
+					double dYaw = net.minecraft.util.Mth.wrapDegrees((double) (yawOther - yawSrc)) * sign;
+					if (Math.abs(dYaw) > 25.0) continue;
+					turnDeg = dYaw * share;
+				}
+			} else {
+				tx = src.entityVel[i * 3] * dt;
+				ty = src.entityVel[i * 3 + 1] * dt;
+				tz = src.entityVel[i * 3 + 2] * dt;
+				double limit = Math.max(0.5, 1.2 * src.entityBox[i * FrameRecord.BOX_FLOATS + 6]);
+				if (tx * tx + ty * ty + tz * tz > limit * limit) continue;
+			}
+			if (tx * tx + ty * ty + tz * tz < 1e-8 && Math.abs(turnDeg) < 1e-3) continue;
+			int b = i * FrameRecord.BOX_FLOATS;
+			float cx = src.entityBox[b];
+			float cz = src.entityBox[b + 1];
+			float yMin = src.entityBox[b + 2];
+			float yMax = src.entityBox[b + 3];
+			float fx = src.entityBox[b + 4];
+			float fz = src.entityBox[b + 5];
+			float halfW = src.entityBox[b + 6];
+			float halfL = src.entityBox[b + 7];
+			float turn = (float) Math.toRadians(-turnDeg);
+			buf.put(cx).put(cz).put(yMin).put(yMax);
+			buf.put(fx).put(fz).put(halfW).put(halfL);
+			buf.put((float) tx).put((float) ty).put((float) tz).put(0.0f);
+			// The model is rotated by (180 - bodyRot) about +Y, so a body turn of +d turns the points by -d.
+			buf.put(turn).put(0.0f).put(0.0f).put(0.0f);
+			// Where the moved box lands on screen, and how far the entity moves on screen relative to static scenery
+			// (so the shader can start its search from the object, see reprojectAll in warp.fsh).
+			float cy = (yMin + yMax) * 0.5f;
+			float x0 = Float.MAX_VALUE;
+			float y0 = Float.MAX_VALUE;
+			float x1 = -Float.MAX_VALUE;
+			float y1 = -Float.MAX_VALUE;
+			boolean behind = false;
+			boolean srcBehind = false;
+			float cos = (float) Math.cos(turn);
+			float sin = (float) Math.sin(turn);
+			for (int k = 0; k < 8; k++) {
+				float along = (k & 1) == 0 ? -halfL : halfL;
+				float side = (k & 4) == 0 ? -halfW : halfW;
+				float rx = fx * along - fz * side;
+				float rz = fz * along + fx * side;
+				float py = (k & 2) == 0 ? yMin : yMax;
+				this.tmpV.set(cx + rx, py, cz + rz, 1.0f);
+				this.srcVp.transform(this.tmpV);
+				if (this.tmpV.w <= 1e-4f) {
+					srcBehind = true;
+				} else {
+					sr[0] = Math.min(sr[0], this.tmpV.x / this.tmpV.w - 0.02f);
+					sr[1] = Math.min(sr[1], this.tmpV.y / this.tmpV.w - 0.02f);
+					sr[2] = Math.max(sr[2], this.tmpV.x / this.tmpV.w + 0.02f);
+					sr[3] = Math.max(sr[3], this.tmpV.y / this.tmpV.w + 0.02f);
+				}
+				this.tmpV.set(cx + cos * rx + sin * rz + (float) tx, py + (float) ty, cz - sin * rx + cos * rz + (float) tz, 1.0f);
+				this.tgt.transform(this.tmpV);
+				if (this.tmpV.w <= 1e-4f) {
+					behind = true;
+					continue;
+				}
+				x0 = Math.min(x0, this.tmpV.x / this.tmpV.w);
+				y0 = Math.min(y0, this.tmpV.y / this.tmpV.w);
+				x1 = Math.max(x1, this.tmpV.x / this.tmpV.w);
+				y1 = Math.max(y1, this.tmpV.y / this.tmpV.w);
+			}
+			if (behind) {
+				x0 = y0 = -2.0f;
+				x1 = y1 = 2.0f;
+			} else {
+				x0 -= 0.02f;
+				y0 -= 0.02f;
+				x1 += 0.02f;
+				y1 += 0.02f;
+			}
+			buf.put(x0).put(y0).put(x1).put(y1);
+			tr[0] = Math.min(tr[0], x0);
+			tr[1] = Math.min(tr[1], y0);
+			tr[2] = Math.max(tr[2], x1);
+			tr[3] = Math.max(tr[3], y1);
+			if (srcBehind) {
+				sr[0] = sr[1] = -2.0f;
+				sr[2] = sr[3] = 2.0f;
+			}
+			this.tmpV.set(cx, cy, cz, 1.0f);
+			this.tgt.transform(this.tmpV);
+			float sx = 0.0f;
+			float sy = 0.0f;
+			if (this.tmpV.w > 1e-4f) {
+				float ax = this.tmpV.x / this.tmpV.w;
+				float ay = this.tmpV.y / this.tmpV.w;
+				this.tmpV.set(cx + (float) tx, cy + (float) ty, cz + (float) tz, 1.0f);
+				this.tgt.transform(this.tmpV);
+				if (this.tmpV.w > 1e-4f) {
+					sx = this.tmpV.x / this.tmpV.w - ax;
+					sy = this.tmpV.y / this.tmpV.w - ay;
+				}
+			}
+			buf.put(sx).put(sy).put(0.0f).put(0.0f);
+			n++;
+		}
+		return n;
+	}
+
+	/**
+	 * Sends the entity table written by {@link #uploadMotion} to the next buffer of the ring. Updating the buffer the
+	 * previous draw reads would make some drivers wait for that draw to finish.
+	 */
+	private void flushMotion() {
+		java.nio.FloatBuffer buf = this.entBuf;
+		if (buf == null) return;
+		buf.clear();
+		this.entUboIndex = (this.entUboIndex + 1) % this.entUbos.length;
+		GL33C.glBindBuffer(GL33C.GL_UNIFORM_BUFFER, this.entUbos[this.entUboIndex]);
+		GL33C.glBufferSubData(GL33C.GL_UNIFORM_BUFFER, 0L, buf);
+		GL33C.glBindBuffer(GL33C.GL_UNIFORM_BUFFER, 0);
+	}
+
+	private void setMotionRects(GlProgram p, String frame, int moving) {
+		if (moving == 0) {
+			p.setVec4("uSrcRect" + frame, 2.0f, 2.0f, -2.0f, -2.0f);
+			p.setVec4("uTgtRect" + frame, 2.0f, 2.0f, -2.0f, -2.0f);
+			return;
+		}
+		float[] sr = this.motionSrcRect;
+		float[] tr = this.motionTgtRect;
+		p.setVec4("uSrcRect" + frame, sr[0], sr[1], sr[2], sr[3]);
+		p.setVec4("uTgtRect" + frame, tr[0], tr[1], tr[2], tr[3]);
 	}
 
 	private void drawInvertQuads(FrameRecord r) {
@@ -792,6 +1021,16 @@ public final class Presenter implements Runnable {
 		p.setMat4("uFwdRotB", this.fwdRot);
 		p.setMat4("uInvB", this.inv);
 		p.setMat4("uInvRotB", this.invRot);
+		// A's entities moved to where they are in B (as the generated frames do).
+		this.target.motionMatrices(this.poseA, this.srcInv, this.tgt);
+		p.setMat4("uSrcInvB", this.srcInv);
+		p.setMat4("uTgtB", this.tgt);
+		int moving = config.movingObjects ? this.uploadMotion(1, a, b, true, 1.0, b.simNanos) : 0;
+		p.setInt("uEntCountB", moving);
+		this.setMotionRects(p, "B", moving);
+		if (moving > 0) this.flushMotion();
+		p.setInt("uEntCountA", 0);
+		GL33C.glBindBufferBase(GL33C.GL_UNIFORM_BUFFER, 0, this.entUbos[this.entUboIndex]);
 		p.setVec2("uSizeB", w, h);
 		p.setVec2("uOutSize", w, h);
 		p.setInt("uUseA", 0);
@@ -807,12 +1046,19 @@ public final class Presenter implements Runnable {
 		bindTexture(3, a.world.glDepth, this.nearestSampler);
 		bindTexture(4, this.testBlank, this.linearSampler);
 		bindTexture(5, this.testBlank, this.linearSampler);
-		GL33C.glDrawArrays(GL33C.GL_TRIANGLES, 0, 3);
-
 		java.nio.ByteBuffer warped = org.lwjgl.system.MemoryUtil.memAlloc(w * h * 4);
 		java.nio.ByteBuffer real = org.lwjgl.system.MemoryUtil.memAlloc(w * h * 4);
 		java.nio.ByteBuffer old = org.lwjgl.system.MemoryUtil.memAlloc(w * h * 4);
+		java.nio.ByteBuffer cameraOnly = moving > 0 ? org.lwjgl.system.MemoryUtil.memAlloc(w * h * 4) : null;
 		try {
+			if (cameraOnly != null) {
+				// Same pair without entity motion, to measure what it adds.
+				p.setInt("uEntCountB", 0);
+				GL33C.glDrawArrays(GL33C.GL_TRIANGLES, 0, 3);
+				GL33C.glReadPixels(0, 0, w, h, GL33C.GL_RGBA, GL33C.GL_UNSIGNED_BYTE, cameraOnly);
+				p.setInt("uEntCountB", moving);
+			}
+			GL33C.glDrawArrays(GL33C.GL_TRIANGLES, 0, 3);
 			GL33C.glReadPixels(0, 0, w, h, GL33C.GL_RGBA, GL33C.GL_UNSIGNED_BYTE, warped);
 			GL33C.glFramebufferTexture2D(GL33C.GL_FRAMEBUFFER, GL33C.GL_COLOR_ATTACHMENT0, GL33C.GL_TEXTURE_2D, b.world.glColor, 0);
 			GL33C.glReadPixels(0, 0, w, h, GL33C.GL_RGBA, GL33C.GL_UNSIGNED_BYTE, real);
@@ -843,6 +1089,13 @@ public final class Presenter implements Runnable {
 			double reusePsnr = psnr(old, real, w, x0, y0, x1, y1, null);
 			int[] covered = new int[1];
 			double coveredPsnr = psnr(warped, real, w, x0, y0, x1, y1, covered);
+			if (cameraOnly != null) {
+				FrameGenMod.LOGGER.info("[self-test] moving entities: PSNR {} dB with entity motion vs. {} dB camera only",
+					String.format("%.2f", warpedPsnr), String.format("%.2f", psnr(cameraOnly, real, w, x0, y0, x1, y1, null)));
+				if (DUMP_DIR != null && this.dumps < 6) {
+					dumpImages(this.dumps++, w, h, old, real, cameraOnly, warped);
+				}
+			}
 			double dist = Pose.distance(this.poseA, this.target);
 			double angle = Math.toDegrees(Pose.angleBetween(this.poseA, this.target));
 			// Micro-benchmark: the full two-frame interpolation pass, isolated with glFinish.
@@ -852,27 +1105,128 @@ public final class Presenter implements Runnable {
 				this.poseB.set(b);
 				this.target.blend(this.poseA, this.poseB, 0.5);
 				Pose saved = new Pose().set(this.target);
-				GL33C.glFinish();
-				long t0 = System.nanoTime();
+				double[] ms = new double[2];
 				int runs = 8;
-				for (int i = 0; i < runs; i++) {
-					this.target.set(saved);
-					this.drawWarp(config, a, b, 0.5, w, h);
+				for (int variant = 0; variant < 2; variant++) {
+					GL33C.glFinish();
+					long t0 = System.nanoTime();
+					for (int i = 0; i < runs; i++) {
+						this.target.set(saved);
+						this.drawWarp(config, a, b, 0.5, w, h, a, variant == 0 ? Double.NaN : 0.5, (a.simNanos + b.simNanos) * 0.5);
+					}
+					GL33C.glFinish();
+					ms[variant] = (System.nanoTime() - t0) / 1e6 / runs;
 				}
-				GL33C.glFinish();
-				double ms = (System.nanoTime() - t0) / 1e6 / runs;
-				FrameGenMod.LOGGER.info("[bench] interpolation pass at {}x{}, quality {}: {} ms/frame", w, h, config.quality, String.format("%.2f", ms));
+				FrameGenMod.LOGGER.info("[bench] interpolation pass at {}x{}, quality {}: {} ms/frame camera only, {} ms/frame with {} moving entities",
+					w, h, config.quality, String.format("%.2f", ms[0]), String.format("%.2f", ms[1]), this.statMovingEntities);
 			}
-			FrameGenMod.LOGGER.info("[self-test] camera moved {} blocks / {} deg: reprojection PSNR {} dB vs. frame reuse {} dB; {}% of pixels reconstructed confidently at {} dB",
+			FrameGenMod.LOGGER.info("[self-test] camera moved {} blocks / {} deg: reprojection PSNR {} dB vs. frame reuse {} dB; {}% of pixels reconstructed confidently at {} dB; {} entities, {} moving",
 				String.format("%.2f", dist), String.format("%.1f", angle), String.format("%.1f", warpedPsnr), String.format("%.1f", reusePsnr),
-				String.format("%.1f", 100.0 * covered[0] / visible), String.format("%.1f", coveredPsnr));
+				String.format("%.1f", 100.0 * covered[0] / visible), String.format("%.1f", coveredPsnr), a.entityCount, moving);
 		} finally {
 			org.lwjgl.system.MemoryUtil.memFree(warped);
 			org.lwjgl.system.MemoryUtil.memFree(real);
 			org.lwjgl.system.MemoryUtil.memFree(old);
+			if (cameraOnly != null) org.lwjgl.system.MemoryUtil.memFree(cameraOnly);
 			GL33C.glFramebufferTexture2D(GL33C.GL_FRAMEBUFFER, GL33C.GL_COLOR_ATTACHMENT0, GL33C.GL_TEXTURE_2D, 0, 0);
 			GL33C.glBindFramebuffer(GL33C.GL_FRAMEBUFFER, 0);
 			GL33C.glBindVertexArray(0);
+		}
+	}
+
+	/** The world frame before {@code r} in the history, or null. */
+	private @Nullable FrameRecord olderWorld(FrameRecord r) {
+		FrameRecord found = null;
+		for (FrameRecord h : this.history) {
+			if (h == r) return found;
+			if (h.hasWorld()) found = h;
+		}
+		return null;
+	}
+
+	private boolean testDraw;
+
+	/**
+	 * Interpolation self-test (debug only): generates the frame between real frames {@code f0} and {@code f2} at the
+	 * moment of {@code f1}, exactly as Interpolate mode would, and compares it with the real {@code f1}. Run with and
+	 * without moving-entity reprojection.
+	 */
+	private void interpolationTest(FrameRecord f0, FrameRecord f1, FrameRecord f2) {
+		int w = f1.world.width;
+		int h = f1.world.height;
+		if (this.testFbo == 0 || this.testWidth != w || this.testHeight != h) return; // selfTest set these up
+		FrameGenConfig config = FrameGenConfig.get();
+		double span = Math.max(1.0, f2.simNanos - f0.simNanos);
+		double u = (f1.simNanos - f0.simNanos) / span;
+		GL33C.glBindFramebuffer(GL33C.GL_FRAMEBUFFER, this.testFbo);
+		GL33C.glFramebufferTexture2D(GL33C.GL_FRAMEBUFFER, GL33C.GL_COLOR_ATTACHMENT0, GL33C.GL_TEXTURE_2D, this.testTexture, 0);
+		GL33C.glViewport(0, 0, w, h);
+		GL33C.glBindVertexArray(this.vao);
+		java.nio.ByteBuffer camOnly = org.lwjgl.system.MemoryUtil.memAlloc(w * h * 4);
+		java.nio.ByteBuffer moving = org.lwjgl.system.MemoryUtil.memAlloc(w * h * 4);
+		java.nio.ByteBuffer real = org.lwjgl.system.MemoryUtil.memAlloc(w * h * 4);
+		this.testDraw = true;
+		try {
+			for (int pass = 0; pass < 2; pass++) {
+				this.target.set(f1).showAsRendered();
+				this.drawWarp(config, f0, f2, 1.0 - u, w, h, f0, pass == 0 ? Double.NaN : u, f1.simNanos);
+				GL33C.glReadPixels(0, 0, w, h, GL33C.GL_RGBA, GL33C.GL_UNSIGNED_BYTE, pass == 0 ? camOnly : moving);
+			}
+			int movingCount = this.statMovingEntities;
+			GL33C.glFramebufferTexture2D(GL33C.GL_FRAMEBUFFER, GL33C.GL_COLOR_ATTACHMENT0, GL33C.GL_TEXTURE_2D, f1.world.glColor, 0);
+			GL33C.glReadPixels(0, 0, w, h, GL33C.GL_RGBA, GL33C.GL_UNSIGNED_BYTE, real);
+			int x0 = Math.round(w * 0.5f * (1.0f - f1.overscanX));
+			int y0 = Math.round(h * 0.5f * (1.0f - f1.overscanY));
+			double withMotion = psnr(moving, real, w, x0, y0, w - x0, h - y0, null);
+			double cameraOnly = psnr(camOnly, real, w, x0, y0, w - x0, h - y0, null);
+			FrameGenMod.LOGGER.info("[self-test] interpolation at t={}: PSNR {} dB with entity motion ({} moving) vs. {} dB camera only",
+				String.format("%.2f", u), String.format("%.2f", withMotion), movingCount, String.format("%.2f", cameraOnly));
+			if (DUMP_DIR != null && movingCount > 0 && this.interpDumps < 6) {
+				java.nio.ByteBuffer a = org.lwjgl.system.MemoryUtil.memAlloc(w * h * 4);
+				java.nio.ByteBuffer b = org.lwjgl.system.MemoryUtil.memAlloc(w * h * 4);
+				GL33C.glFramebufferTexture2D(GL33C.GL_FRAMEBUFFER, GL33C.GL_COLOR_ATTACHMENT0, GL33C.GL_TEXTURE_2D, f0.world.glColor, 0);
+				GL33C.glReadPixels(0, 0, w, h, GL33C.GL_RGBA, GL33C.GL_UNSIGNED_BYTE, a);
+				GL33C.glFramebufferTexture2D(GL33C.GL_FRAMEBUFFER, GL33C.GL_COLOR_ATTACHMENT0, GL33C.GL_TEXTURE_2D, f2.world.glColor, 0);
+				GL33C.glReadPixels(0, 0, w, h, GL33C.GL_RGBA, GL33C.GL_UNSIGNED_BYTE, b);
+				dumpImages(100 + this.interpDumps++, w, h, a, real, b, camOnly, moving);
+				org.lwjgl.system.MemoryUtil.memFree(a);
+				org.lwjgl.system.MemoryUtil.memFree(b);
+			}
+		} finally {
+			this.testDraw = false;
+			org.lwjgl.system.MemoryUtil.memFree(camOnly);
+			org.lwjgl.system.MemoryUtil.memFree(moving);
+			org.lwjgl.system.MemoryUtil.memFree(real);
+			GL33C.glFramebufferTexture2D(GL33C.GL_FRAMEBUFFER, GL33C.GL_COLOR_ATTACHMENT0, GL33C.GL_TEXTURE_2D, 0, 0);
+			GL33C.glBindFramebuffer(GL33C.GL_FRAMEBUFFER, 0);
+			GL33C.glBindVertexArray(0);
+		}
+	}
+
+	private int interpDumps;
+
+
+	/** Dev only ({@code -Dframegen.debug.dump=<dir>}): self-test images A | B | camera-only | with entity motion. */
+	private static final @Nullable String DUMP_DIR = System.getProperty("framegen.debug.dump");
+	private int dumps;
+
+	private static void dumpImages(int index, int w, int h, java.nio.ByteBuffer... images) {
+		try {
+			java.awt.image.BufferedImage out = new java.awt.image.BufferedImage(w * images.length, h, java.awt.image.BufferedImage.TYPE_INT_RGB);
+			for (int k = 0; k < images.length; k++) {
+				for (int y = 0; y < h; y++) {
+					for (int x = 0; x < w; x++) {
+						int i = ((h - 1 - y) * w + x) * 4;
+						java.nio.ByteBuffer b = images[k];
+						out.setRGB(k * w + x, y, (b.get(i) & 0xFF) << 16 | (b.get(i + 1) & 0xFF) << 8 | (b.get(i + 2) & 0xFF));
+					}
+				}
+			}
+			java.nio.file.Path dir = java.nio.file.Path.of(DUMP_DIR);
+			java.nio.file.Files.createDirectories(dir);
+			javax.imageio.ImageIO.write(out, "png", dir.resolve("selftest_" + index + ".png").toFile());
+		} catch (Exception e) {
+			FrameGenMod.LOGGER.warn("dump failed", e);
 		}
 	}
 

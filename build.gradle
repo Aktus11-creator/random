@@ -32,6 +32,7 @@ loom {
 			// This flag (dev only, never set for players) lets the game create its window there.
 			vmArg "-Dframegen.dev.noSrgbVisual=true"
 			vmArg "-Dframegen.debug=true"
+			vmArg "-Dframegen.debug.dump=framegen-debug/selftest"
 		}
 	}
 }

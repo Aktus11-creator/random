@@ -35,6 +35,41 @@ public final class FrameRecord {
 	public double camX;
 	public double camY;
 	public double camZ;
+	/**
+	 * Moving objects (entities) in this frame, nearest first. For each: its id, rendered position (absolute world),
+	 * a box around it that turns with its body, relative to this frame's camera ({@link #BOX_FLOATS} floats: centre x,
+	 * centre z, min y, max y, facing x, facing z, half width, half length), its velocity in blocks per second and its
+	 * body yaw in degrees (NaN if it has none). Generated frames move the pixels inside the box with the entity.
+	 */
+	public int entityCount;
+	public int[] entityIds = EMPTY_INT;
+	public double[] entityPos = EMPTY_DOUBLE;
+	public float[] entityBox = EMPTY_FLOAT;
+	public float[] entityVel = EMPTY_FLOAT;
+	public float[] entityYaw = EMPTY_FLOAT;
+	public static final int MAX_ENTITIES = 64;
+	public static final int BOX_FLOATS = 8;
+	private static final int[] EMPTY_INT = new int[0];
+	private static final double[] EMPTY_DOUBLE = new double[0];
+	private static final float[] EMPTY_FLOAT = new float[0];
+
+	void allocateEntities(int count) {
+		this.entityCount = count;
+		this.entityIds = new int[count];
+		this.entityPos = new double[count * 3];
+		this.entityBox = new float[count * BOX_FLOATS];
+		this.entityVel = new float[count * 3];
+		this.entityYaw = new float[count];
+	}
+
+	/** Index of the entity with this id, or -1. */
+	int findEntity(int id) {
+		for (int i = 0; i < this.entityCount; i++) {
+			if (this.entityIds[i] == id) return i;
+		}
+		return -1;
+	}
+
 	/** Camera discontinuity before this frame (teleport, respawn, dimension change...). Never interpolate across. */
 	public boolean cut;
 	/** Depth buffer convention: true = glClipControl ZERO_TO_ONE (window depth == NDC z), false = default [-1, 1] mapping. */

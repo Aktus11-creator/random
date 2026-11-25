@@ -108,6 +108,14 @@ public final class SodiumConfigEntry implements ConfigEntryPoint {
 				.setStorageHandler(save));
 
 		OptionGroupBuilder display = builder.createOptionGroup()
+			.addOption(builder.createBooleanOption(id("moving_objects"))
+				.setName(Component.translatable("framegen.option.moving_objects"))
+				.setTooltip(tooltip("framegen.option.moving_objects"))
+				.setImpact(OptionImpact.LOW)
+				.setDefaultValue(true)
+				.setEnabledProvider(s -> s.readBooleanOption(enabledId), enabledId)
+				.setBinding(v -> c.movingObjects = v, () -> c.movingObjects)
+				.setStorageHandler(save))
 			.addOption(builder.createIntegerOption(id("overscan"))
 				.setName(Component.translatable("framegen.option.overscan"))
 				.setTooltip(tooltip("framegen.option.overscan"))

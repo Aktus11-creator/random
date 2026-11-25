@@ -28,6 +28,7 @@ import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.GlobalSettingsUniform;
 import net.minecraft.client.renderer.RenderPipelines;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
+import net.minecraft.client.renderer.entity.state.LivingEntityRenderState;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.util.ARGB;
 import net.minecraft.world.phys.Vec3;
@@ -309,6 +310,64 @@ public final class FrameCapture {
 		}
 	}
 
+	/**
+	 * Records the entities rendered this frame (position, velocity, a box around them) so generated frames can move
+	 * their pixels. Boxes are the hitbox, padded because models stick out of it (heads, tails, held items), but not
+	 * downwards: the ground under a mob must not move with it.
+	 */
+	private void captureEntities(FrameRecord r, List<EntityRenderState> states, CameraRenderState camera) {
+		Minecraft mc = Minecraft.getInstance();
+		var cameraEntity = mc.getCameraEntity();
+		int skipId = cameraEntity != null && camera.isFirstPerson ? cameraEntity.getId() : Integer.MIN_VALUE;
+		int n = 0;
+		EntityRenderState[] picked = new EntityRenderState[Math.min(states.size(), 256)];
+		for (EntityRenderState state : states) {
+			if (n == picked.length) break;
+			EntityMotionState motion = (EntityMotionState) state;
+			if (motion.framegen$entityId() < 0 || motion.framegen$entityId() == skipId || state.boundingBoxWidth <= 0.0f) continue;
+			picked[n++] = state;
+		}
+		if (n == 0) {
+			r.entityCount = 0;
+			return;
+		}
+		java.util.Arrays.sort(picked, 0, n, java.util.Comparator.comparingDouble(st -> st.distanceToCameraSq));
+		int count = Math.min(n, FrameRecord.MAX_ENTITIES);
+		r.allocateEntities(count);
+		for (int i = 0; i < count; i++) {
+			EntityRenderState st = picked[i];
+			EntityMotionState motion = (EntityMotionState) st;
+			r.entityIds[i] = motion.framegen$entityId();
+			r.entityPos[i * 3] = st.x;
+			r.entityPos[i * 3 + 1] = st.y;
+			r.entityPos[i * 3 + 2] = st.z;
+			// Models stick out of the hitbox, mostly forwards (heads, necks), so the box turns with the body and is
+			// longer than it is wide. Downwards it stops just above the feet: the ground must not move with the mob.
+			float w = st.boundingBoxWidth;
+			float yaw = st instanceof LivingEntityRenderState living ? living.bodyRot : Float.NaN;
+			int b = i * FrameRecord.BOX_FLOATS;
+			r.entityBox[b] = (float) (st.x - camera.pos.x);
+			r.entityBox[b + 1] = (float) (st.z - camera.pos.z);
+			r.entityBox[b + 2] = (float) (st.y - camera.pos.y) + 0.03f;
+			r.entityBox[b + 3] = (float) (st.y - camera.pos.y) + st.boundingBoxHeight + 0.15f + 0.05f * st.boundingBoxHeight;
+			if (Float.isNaN(yaw)) {
+				r.entityBox[b + 4] = 1.0f;
+				r.entityBox[b + 5] = 0.0f;
+				r.entityBox[b + 6] = r.entityBox[b + 7] = w * 0.5f + 0.2f;
+			} else {
+				double rad = Math.toRadians(yaw);
+				r.entityBox[b + 4] = (float) -Math.sin(rad);
+				r.entityBox[b + 5] = (float) Math.cos(rad);
+				r.entityBox[b + 6] = w * 0.5f + 0.15f;
+				r.entityBox[b + 7] = Math.max(w * 0.5f + 0.15f, w * 0.95f + 0.1f);
+			}
+			r.entityVel[i * 3] = motion.framegen$vx();
+			r.entityVel[i * 3 + 1] = motion.framegen$vy();
+			r.entityVel[i * 3 + 2] = motion.framegen$vz();
+			r.entityYaw[i] = yaw;
+		}
+	}
+
 	// ==== Overscan ================================================================================================
 
 	/** {@code GameRenderer.render}: the arguments of this frame's global uniform update. */
@@ -323,7 +382,7 @@ public final class FrameCapture {
 	}
 
 	/**
-	 * Hook O, start of {@code renderLevel}: render the level with a wider view than the screen shows. The main target
+	 * Hook O (part of {@link #beginLevel}): render the level with a wider view than the screen shows. The main target
 	 * is swapped for one that is larger by the overscan margin on every side, and the projection is pre-scaled in clip
 	 * space by exactly the size ratio, so the centre of the larger image is pixel-for-pixel the vanilla image (it is
 	 * cropped back out before the hand renders, hook A). Generated frames use the margin for screen edges that come
@@ -332,7 +391,16 @@ public final class FrameCapture {
 	 * <p>Working on the main target itself (rather than the window size) keeps resolution-scaling mods working: their
 	 * larger main target simply gets a proportionally larger margin, and they find their usual image after the crop.
 	 */
-	public void beginOverscan(GameRenderer gameRenderer) {
+	public void beginLevel(GameRenderer gameRenderer) {
+		if (this.splitPlanned && this.record != null && FrameGenConfig.get().movingObjects) {
+			// The level renderer clears this list while rendering, so take it now.
+			var levelState = gameRenderer.gameRenderState().levelRenderState;
+			this.captureEntities(this.record, levelState.entityRenderStates, levelState.cameraRenderState);
+		}
+		this.beginOverscan(gameRenderer);
+	}
+
+	private void beginOverscan(GameRenderer gameRenderer) {
 		if (this.overscanActive) return;
 		FrameGenConfig config = FrameGenConfig.get();
 		int percent = config.overscan;

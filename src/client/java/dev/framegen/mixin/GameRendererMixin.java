@@ -39,7 +39,7 @@ abstract class GameRendererMixin {
 	@Inject(method = "renderLevel", at = @At("HEAD"))
 	private void framegen$beginLevel(CallbackInfo ci) {
 		FrameCapture capture = FrameGenEngine.capture();
-		if (capture != null) capture.beginOverscan((GameRenderer) (Object) this);
+		if (capture != null) capture.beginLevel((GameRenderer) (Object) this);
 	}
 
 	@ModifyArg(

@@ -94,6 +94,16 @@ final class Pose {
 	}
 
 	/**
+	 * The two halves of the reprojection, for points that move on their own: {@code srcInv} maps source NDC (+ depth)
+	 * to a homogeneous point relative to the source camera (world axes), {@code tgt} maps such a point to this pose's
+	 * clip space. {@code tgt * srcInv} is the {@code fwd} matrix of {@link #reprojection}.
+	 */
+	void motionMatrices(Pose source, Matrix4f srcInv, Matrix4f tgt) {
+		srcInv.set(this.tmpA.set(source.projection).rotate(source.rotation).invert());
+		tgt.set(this.tmpB.set(this.display).rotate(this.rotation).translate(source.x - this.x, source.y - this.y, source.z - this.z));
+	}
+
+	/**
 	 * Builds the matrices mapping a source frame rendered from {@code source} to clip space of {@code target}.
 	 * Results: fwd (with translation), fwdRot (rotation only, for points at infinity) and their inverses.
 	 */

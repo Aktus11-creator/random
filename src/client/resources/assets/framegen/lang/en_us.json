@@ -39,6 +39,8 @@
 	"framegen.option.output_fps.tooltip": "Used when V-Sync is off. With V-Sync on, frames are presented at the display refresh rate.",
 	"framegen.option.overscan": "Overscan",
 	"framegen.option.overscan.tooltip": "Renders a little more of the world than fits on screen (this much extra on every side). When you turn fast, generated frames show the real scenery at the screen edges instead of stretched edge pixels. Real frames look exactly the same. Costs GPU time: 8% renders about 35% more pixels. Off when post effects or glowing entities are on screen.",
+	"framegen.option.moving_objects": "Smooth Moving Objects",
+	"framegen.option.moving_objects.tooltip": "Move mobs, players, items, minecarts and boats smoothly in generated frames, instead of only the camera. Walking and turning are smoothed; limb animations still update at the real frame rate.",
 	"framegen.option.sharp_hud": "Sharp HUD and Hand",
 	"framegen.option.sharp_hud.tooltip": "Keep the HUD and your first-person hand out of the reprojection so they never wobble or smear. Disable only if another mod draws HUD elements that look wrong.",
 	"framegen.option.extrapolation": "Max Prediction",
@@ -48,7 +50,7 @@
 	"framegen.option.stats": "Show Stats",
 	"framegen.option.stats.tooltip": "Show output / real frame rates in the top left corner.",
 	"framegen.option.debug": "Debug View",
-	"framegen.option.debug.tooltip": "Tint pixels the reprojection could not reconstruct confidently in magenta.",
+	"framegen.option.debug.tooltip": "Tint pixels the reprojection could not reconstruct confidently in magenta, and pixels moved with a mob or player in blue.",
 
 	"framegen.status.unsupported_backend": "FrameGen inactive: requires the OpenGL graphics API (Video Settings > Graphics API)",
 	"framegen.status.failed": "FrameGen inactive: could not start (see log)",

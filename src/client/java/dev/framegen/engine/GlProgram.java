@@ -13,6 +13,14 @@ import org.lwjgl.system.MemoryStack;
 /** Minimal raw-GL shader program wrapper for the presenter context (Minecraft's pipeline system lives in the other context). */
 final class GlProgram implements AutoCloseable {
 	private final int program;
+
+	/** Connects the named uniform block to a {@code GL_UNIFORM_BUFFER} binding point (no-op if the block is unused). */
+	void bindUniformBlock(String name, int binding) {
+		int index = GL33C.glGetUniformBlockIndex(this.program, name);
+		if (index != GL33C.GL_INVALID_INDEX) {
+			GL33C.glUniformBlockBinding(this.program, index, binding);
+		}
+	}
 	private final Map<String, Integer> locations = new HashMap<>();
 
 	GlProgram(String name, String vertexResource, String fragmentResource) {

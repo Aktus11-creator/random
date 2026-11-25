@@ -11,6 +11,8 @@
 		"GameRendererAccessor",
 		"CameraMixin",
 		"SkyRendererMixin",
+		"EntityRenderStateMixin",
+		"EntityRendererMixin",
 		"LevelRendererAccessor",
 		"GuiGraphicsExtractorMixin",
 		"GlCommandEncoderMixin",
