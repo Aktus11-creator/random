@@ -6,6 +6,7 @@ import java.nio.FloatBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
+import org.jspecify.annotations.Nullable;
 import org.lwjgl.opengl.GL33C;
 import org.lwjgl.system.MemoryStack;
 
@@ -15,8 +16,16 @@ final class GlProgram implements AutoCloseable {
 	private final Map<String, Integer> locations = new HashMap<>();
 
 	GlProgram(String name, String vertexResource, String fragmentResource) {
-		int vs = compile(GL33C.GL_VERTEX_SHADER, vertexResource);
-		int fs = compile(GL33C.GL_FRAGMENT_SHADER, fragmentResource);
+		this(name, vertexResource, fragmentResource, null, "");
+	}
+
+	/**
+	 * @param version replaces the {@code #version} line of both shaders (null = keep)
+	 * @param defines inserted right after the {@code #version} line of both shaders
+	 */
+	GlProgram(String name, String vertexResource, String fragmentResource, @Nullable String version, String defines) {
+		int vs = compile(GL33C.GL_VERTEX_SHADER, vertexResource, version, defines);
+		int fs = compile(GL33C.GL_FRAGMENT_SHADER, fragmentResource, version, defines);
 		this.program = GL33C.glCreateProgram();
 		GL33C.glAttachShader(this.program, vs);
 		GL33C.glAttachShader(this.program, fs);
@@ -33,8 +42,14 @@ final class GlProgram implements AutoCloseable {
 		}
 	}
 
-	private static int compile(int type, String resource) {
+	private static int compile(int type, String resource, @Nullable String version, String defines) {
 		String source = load(resource);
+		int eol = source.indexOf('\n');
+		String first = eol >= 0 ? source.substring(0, eol) : source;
+		String rest = eol >= 0 ? source.substring(eol + 1) : "";
+		if (first.startsWith("#version")) {
+			source = (version != null ? version : first) + "\n" + defines + rest;
+		}
 		int shader = GL33C.glCreateShader(type);
 		GL33C.glShaderSource(shader, source);
 		GL33C.glCompileShader(shader);

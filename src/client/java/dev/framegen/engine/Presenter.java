@@ -59,6 +59,7 @@ public final class Presenter implements Runnable {
 	// ---- Presenter-thread state ------------------------------------------------------------------------------
 	private GlProgram warp;
 	private GlProgram passthrough;
+	private GlProgram compose;
 	private GlProgram invertQuad;
 	private int vao;
 	private int linearSampler;
@@ -221,7 +222,19 @@ public final class Presenter implements Runnable {
 	}
 
 	private void initGl() {
-		this.warp = new GlProgram("warp", "fullscreen.vsh", "warp.fsh");
+		// textureGather fetches the 2x2 depth footprint in one go (core in GL 4.0, or ARB_texture_gather).
+		var caps = GL.getCapabilities();
+		String version = null;
+		String defines = "";
+		if (caps.OpenGL40) {
+			version = "#version 400 core";
+			defines = "#define HAS_GATHER\n";
+		} else if (caps.GL_ARB_texture_gather) {
+			defines = "#extension GL_ARB_texture_gather : require\n#define HAS_GATHER\n";
+		}
+		this.warp = new GlProgram("warp", "fullscreen.vsh", "warp.fsh", version, defines);
+		this.compose = new GlProgram("compose", "fullscreen.vsh", "compose.fsh");
+		FrameGenMod.LOGGER.info("FrameGen presenter ready ({}, texture gather: {})", GL33C.glGetString(GL33C.GL_VERSION), !defines.isEmpty());
 		this.passthrough = new GlProgram("passthrough", "fullscreen.vsh", "passthrough.fsh");
 		this.invertQuad = new GlProgram("invert_quad", "invert_quad.vsh", "invert_quad.fsh");
 
@@ -234,6 +247,10 @@ public final class Presenter implements Runnable {
 		this.warp.setInt("uVignetteTex", 5);
 		this.passthrough.use();
 		this.passthrough.setInt("uOverlay", 4);
+		this.compose.use();
+		this.compose.setInt("uWorld", 2);
+		this.compose.setInt("uOverlay", 4);
+		this.compose.setInt("uVignetteTex", 5);
 		this.invertQuad.use();
 		this.invertQuad.setInt("uTexture", 6);
 		GL33C.glUseProgram(0);
@@ -281,11 +298,13 @@ public final class Presenter implements Runnable {
 			this.inflight.clear();
 			if (this.warp != null) this.warp.close();
 			if (this.passthrough != null) this.passthrough.close();
+			if (this.compose != null) this.compose.close();
 			if (this.invertQuad != null) this.invertQuad.close();
 			if (this.vao != 0) GL33C.glDeleteVertexArrays(this.vao);
 			if (this.testFbo != 0) GL33C.glDeleteFramebuffers(this.testFbo);
 			if (this.testTexture != 0) GL33C.glDeleteTextures(this.testTexture);
 			if (this.testBlank != 0) GL33C.glDeleteTextures(this.testBlank);
+			if (this.timerQueries[0] != 0) GL33C.glDeleteQueries(this.timerQueries);
 			if (this.linearSampler != 0) GL33C.glDeleteSamplers(this.linearSampler);
 			if (this.nearestSampler != 0) GL33C.glDeleteSamplers(this.nearestSampler);
 		} catch (Throwable t) {
@@ -311,6 +330,13 @@ public final class Presenter implements Runnable {
 		}
 
 		boolean generate = config.enabled && newest.hasWorld();
+		// Native mode: the game already delivers (close to) one real frame per display refresh, so generated frames
+		// would only add latency and GPU work. Show each real frame once, exactly like vanilla presentation.
+		boolean nativeMode = generate && this.updateNativeMode(config);
+		this.statNative = nativeMode;
+		if (nativeMode) {
+			generate = false;
+		}
 		if (!generate && newest.id == this.lastShownRecordId) {
 			// Nothing new to show and nothing to generate: wait for the game instead of re-presenting the same image.
 			this.statGenerating = false;
@@ -334,6 +360,7 @@ public final class Presenter implements Runnable {
 		GL33C.glViewport(0, 0, w, h);
 		GL33C.glBindVertexArray(this.vao);
 
+		this.beginGpuTimer();
 		FrameRecord overlaySource = newest;
 		if (generate) {
 			this.statGenerating = true;
@@ -346,12 +373,12 @@ public final class Presenter implements Runnable {
 			if (newest.opaque) {
 				this.drawOpaque(newest);
 			} else {
-				this.target.set(newest);
-				this.drawWarp(config, null, newest, 0.0, w, h);
+				this.drawCompose(newest);
 			}
 		}
 		this.drawInvertQuads(overlaySource);
 		GL33C.glBindVertexArray(0);
+		this.endGpuTimer();
 
 		if (!this.glErrorLogged) {
 			int error = GL33C.glGetError();
@@ -381,11 +408,25 @@ public final class Presenter implements Runnable {
 	}
 
 	/** Moves published records in, polls their fences and builds the history of ready frames. */
+	private long inflightSince;
+	private boolean inflightWarned;
+
 	private void ingest() {
 		this.taken.clear();
 		this.exchange.take(this.taken);
 		this.inflight.addAll(this.taken);
 		long now = System.nanoTime();
+		// Frames whose GPU fence never signals would leave the screen frozen. Warn once, with details, if that happens.
+		if (this.inflight.size() >= 3) {
+			if (this.inflightSince == 0L) this.inflightSince = now;
+			if (!this.inflightWarned && now - this.inflightSince > 2_000_000_000L) {
+				this.inflightWarned = true;
+				FrameGenMod.LOGGER.warn("FrameGen: {} frames have been waiting on the GPU for over 2 s (driver: {} / {}). "
+					+ "Please report this with your latest.log.", this.inflight.size(), GL33C.glGetString(GL33C.GL_RENDERER), GL33C.glGetString(GL33C.GL_VERSION));
+			}
+		} else {
+			this.inflightSince = 0L;
+		}
 		while (!this.inflight.isEmpty()) {
 			FrameRecord r = this.inflight.peekFirst();
 			int status = GL33C.glClientWaitSync(r.readyFence, 0, 0L);
@@ -455,6 +496,50 @@ public final class Presenter implements Runnable {
 		this.passthrough.use();
 		bindTexture(4, r.overlay.glColor, this.linearSampler);
 		GL33C.glDrawArrays(GL33C.GL_TRIANGLES, 0, 3);
+	}
+
+	/** A real frame with a separate world layer, shown without reprojection. */
+	private void drawCompose(FrameRecord r) {
+		GlProgram p = this.compose;
+		p.use();
+		bindTexture(2, r.world.glColor, this.linearSampler);
+		bindTexture(4, r.overlay.glColor, this.linearSampler);
+		if (r.vignette && r.vignetteTexture != 0) {
+			p.setInt("uVignette", 1);
+			p.setVec3("uVignetteColor", r.vignetteR, r.vignetteG, r.vignetteB);
+			bindTexture(5, r.vignetteTexture, this.linearSampler);
+		} else {
+			p.setInt("uVignette", 0);
+			bindTexture(5, r.world.glColor, this.linearSampler);
+		}
+		GL33C.glDrawArrays(GL33C.GL_TRIANGLES, 0, 3);
+	}
+
+	private boolean nativeMode;
+	private volatile boolean statNative;
+
+	/** Interval between presented frames we aim for, in nanoseconds. */
+	private double outputIntervalNanos(FrameGenConfig config) {
+		if (this.vsync && this.vsyncHonored) return 1e9 / this.displayHz;
+		double fps = config.targetOutputFps > 0 ? config.targetOutputFps : this.displayHz;
+		return 1e9 / fps;
+	}
+
+	/** Hysteresis between generating and native presentation, based on the real frame interval. */
+	private boolean updateNativeMode(FrameGenConfig config) {
+		if (this.intervalEma <= 0) return this.nativeMode;
+		double ratio = this.intervalEma / this.outputIntervalNanos(config);
+		if (this.nativeMode && ratio > 1.30) {
+			this.nativeMode = false;
+		} else if (!this.nativeMode && ratio < 1.12) {
+			this.nativeMode = true;
+		}
+		return this.nativeMode;
+	}
+
+	/** True while frame generation is on but the game is fast enough that real frames are shown as is. */
+	public boolean isNative() {
+		return this.statNative;
 	}
 
 	private void drawGenerated(FrameGenConfig config, long now, int w, int h) {
@@ -727,6 +812,24 @@ public final class Presenter implements Runnable {
 			double coveredPsnr = psnr(warped, real, w * h, covered);
 			double dist = Pose.distance(this.poseA, this.target);
 			double angle = Math.toDegrees(Pose.angleBetween(this.poseA, this.target));
+			// Micro-benchmark: the full two-frame interpolation pass, isolated with glFinish.
+			if (!this.history.isEmpty() && this.history.getLast().overlay != null) {
+				GL33C.glFramebufferTexture2D(GL33C.GL_FRAMEBUFFER, GL33C.GL_COLOR_ATTACHMENT0, GL33C.GL_TEXTURE_2D, this.testTexture, 0);
+				this.poseA.set(a);
+				this.poseB.set(b);
+				this.target.blend(this.poseA, this.poseB, 0.5);
+				Pose saved = new Pose().set(this.target);
+				GL33C.glFinish();
+				long t0 = System.nanoTime();
+				int runs = 8;
+				for (int i = 0; i < runs; i++) {
+					this.target.set(saved);
+					this.drawWarp(config, a, b, 0.5, w, h);
+				}
+				GL33C.glFinish();
+				double ms = (System.nanoTime() - t0) / 1e6 / runs;
+				FrameGenMod.LOGGER.info("[bench] interpolation pass at {}x{}, quality {}: {} ms/frame", w, h, config.quality, String.format("%.2f", ms));
+			}
 			FrameGenMod.LOGGER.info("[self-test] camera moved {} blocks / {} deg: reprojection PSNR {} dB vs. frame reuse {} dB; {}% of pixels reconstructed confidently at {} dB",
 				String.format("%.2f", dist), String.format("%.1f", angle), String.format("%.1f", warpedPsnr), String.format("%.1f", reusePsnr),
 				String.format("%.1f", 100.0 * covered[0] / (w * h)), String.format("%.1f", coveredPsnr));
@@ -787,6 +890,49 @@ public final class Presenter implements Runnable {
 		return sync;
 	}
 
+	// ---- GPU timing -----------------------------------------------------------------------------------------------
+
+	private final int[] timerQueries = new int[4];
+	private final boolean[] timerPending = new boolean[4];
+	private int timerIndex;
+	private double gpuMsAccum;
+	private int gpuSamples;
+	private volatile float statGpuMs;
+
+	/** GPU time of the presenter's own drawing (the cost it adds on top of the game), via GL_TIME_ELAPSED queries. */
+	private void beginGpuTimer() {
+		if (this.timerQueries[0] == 0) {
+			GL33C.glGenQueries(this.timerQueries);
+		}
+		// Collect finished results without stalling.
+		for (int i = 0; i < this.timerQueries.length; i++) {
+			if (this.timerPending[i] && GL33C.glGetQueryObjecti(this.timerQueries[i], GL33C.GL_QUERY_RESULT_AVAILABLE) != 0) {
+				this.gpuMsAccum += GL33C.glGetQueryObjecti64(this.timerQueries[i], GL33C.GL_QUERY_RESULT) / 1e6;
+				this.gpuSamples++;
+				this.timerPending[i] = false;
+			}
+		}
+		this.timerIndex = (this.timerIndex + 1) % this.timerQueries.length;
+		if (this.timerPending[this.timerIndex]) {
+			this.timerIndex = -1; // all queries still in flight; skip timing this frame
+			return;
+		}
+		GL33C.glBeginQuery(GL33C.GL_TIME_ELAPSED, this.timerQueries[this.timerIndex]);
+	}
+
+	private void endGpuTimer() {
+		if (this.timerIndex < 0) {
+			this.timerIndex = 0;
+			return;
+		}
+		GL33C.glEndQuery(GL33C.GL_TIME_ELAPSED);
+		this.timerPending[this.timerIndex] = true;
+	}
+
+	public float gpuMs() {
+		return this.statGpuMs;
+	}
+
 	// ---- Pacing -----------------------------------------------------------------------------------------------
 
 	private void pace(FrameGenConfig config, boolean generating, long presentedAt) {
@@ -831,14 +977,19 @@ public final class Presenter implements Runnable {
 			this.statLatencyMs = (float) (Math.max(0.0, this.delayNanos) / 1e6);
 			if (DEBUG_LOG && now - this.lastDebugLog > 2_000_000_000L) {
 				this.lastDebugLog = now;
-				FrameGenMod.LOGGER.info("[presenter] out {} fps, real {} fps, generating={}, delay {} ms, latency~{} ms, interval~{} ms, cost {} ms, history {}, inflight {}",
-					String.format("%.1f", this.statOutputFps), String.format("%.1f", this.statRealFps), this.statGenerating,
+				FrameGenMod.LOGGER.info("[presenter] out {} fps, real {} fps, generating={}, delay {} ms, latency~{} ms, interval~{} ms, cost {} ms, gpu {} ms, history {}, inflight {}",
+					String.format("%.1f", this.statOutputFps), String.format("%.1f", this.statRealFps), this.statGenerating + (this.statNative ? " (native)" : ""),
 					String.format("%.1f", this.statLatencyMs), String.format("%.1f", this.latencyHigh / 1e6), String.format("%.1f", this.intervalHigh / 1e6),
-					String.format("%.2f", this.statPresentCostMs), this.history.size(), this.inflight.size());
+					String.format("%.2f", this.statPresentCostMs), String.format("%.3f", this.statGpuMs), this.history.size(), this.inflight.size());
 			}
 			this.statOutputFrames = 0;
 			this.statRealFrames = 0;
 			this.statCostAccum = 0.0;
+			if (this.gpuSamples > 0) {
+				this.statGpuMs = (float) (this.gpuMsAccum / this.gpuSamples);
+				this.gpuMsAccum = 0.0;
+				this.gpuSamples = 0;
+			}
 			this.statWindowStart = now;
 		}
 	}

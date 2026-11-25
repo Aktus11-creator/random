@@ -210,7 +210,7 @@ public final class FrameExchange {
 	 * Render thread: emulate V-Sync back-pressure when frames are passed straight through. Blocks until the frame
 	 * {@code id - queueDepth} has been displayed (or the timeout passes).
 	 */
-	public void awaitDisplayed(long id, int queueDepth, long timeoutMs) {
+	public boolean awaitDisplayed(long id, int queueDepth, long timeoutMs) {
 		long target = id - queueDepth;
 		this.lock.lock();
 		try {
@@ -220,8 +220,10 @@ public final class FrameExchange {
 				if (remaining <= 0L) break;
 				this.changed.awaitNanos(remaining);
 			}
+			return this.lastDisplayedId >= target || this.closed;
 		} catch (InterruptedException e) {
 			Thread.currentThread().interrupt();
+			return false;
 		} finally {
 			this.lock.unlock();
 		}

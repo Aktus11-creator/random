@@ -95,6 +95,9 @@ public final class FrameGenMod implements ClientModInitializer {
 		if (!config.enabled) {
 			return Component.translatable("framegen.stats.off", fmt(p.realFps()));
 		}
+		if (p.isNative()) {
+			return Component.translatable("framegen.stats.native", fmt(p.realFps()));
+		}
 		if (!p.isGenerating()) {
 			return Component.translatable("framegen.stats.idle", fmt(p.realFps()));
 		}

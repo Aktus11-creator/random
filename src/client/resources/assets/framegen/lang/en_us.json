@@ -17,7 +17,8 @@
 	"framegen.quality.high": "High",
 	"framegen.quality.ultra": "Ultra",
 	"framegen.multiplier.off": "Game limit",
-	"framegen.multiplier.value": "%sx",
+	"framegen.multiplier.value": "1/%s display",
+	"framegen.multiplier.display": "Display rate",
 	"framegen.output_fps.display": "Display",
 	"framegen.extrapolation.value": "%s frames",
 
@@ -27,8 +28,8 @@
 	"framegen.option.mode.tooltip": "Interpolate: blends between the two newest real frames. Smoothest and artifact-free for camera motion; adds about one real frame of latency.\nExtrapolate: predicts the camera forward from the newest frame. No added latency; may briefly overshoot when you stop turning.",
 	"framegen.option.quality": "Quality",
 	"framegen.option.quality.tooltip": "Number of solver iterations per pixel and whether disoccluded areas are filled with background. Higher is more accurate around edges and costs a bit more GPU time on the presentation thread.",
-	"framegen.option.multiplier": "Multiplier",
-	"framegen.option.multiplier.tooltip": "Caps the real frame rate to output / multiplier so the GPU has time left for generated frames, and gives the interpolator evenly spaced frames. 'Game limit' uses your Max Framerate setting instead.",
+	"framegen.option.multiplier": "Real FPS Limit",
+	"framegen.option.multiplier.tooltip": "Limits how many real frames the game renders while FrameGen is on. Display rate (recommended): never render more frames than your display shows; FrameGen only fills in when the game drops below it. 1/2 display and lower trade real frames for GPU headroom (only useful if the game stutters). Game limit: use your Max Framerate setting.",
 	"framegen.option.output_fps": "Output FPS",
 	"framegen.option.output_fps.tooltip": "Used when V-Sync is off. With V-Sync on, frames are presented at the display refresh rate.",
 	"framegen.option.sharp_hud": "Sharp HUD and Hand",
@@ -46,5 +47,6 @@
 	"framegen.status.failed": "FrameGen inactive: could not start (see log)",
 	"framegen.stats.off": "FrameGen off | %s fps",
 	"framegen.stats.idle": "FrameGen idle (menu) | %s fps",
+	"framegen.stats.native": "FrameGen native | %s fps (game already keeps up with the display, nothing to generate)",
 	"framegen.stats.on": "FrameGen %s fps (real %s) | %s | delay %s ms | present %s ms"
 }

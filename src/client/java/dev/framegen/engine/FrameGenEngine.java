@@ -166,7 +166,7 @@ public final class FrameGenEngine {
 	public static int adjustFramerateLimit(int vanillaLimit) {
 		Presenter p = presenter;
 		FrameGenConfig config = FrameGenConfig.get();
-		if (p == null || !isPresenterRunning() || !config.enabled || config.multiplier <= 0 || !p.isGenerating()) {
+		if (p == null || !isPresenterRunning() || !config.enabled || config.multiplier <= 0 || !(p.isGenerating() || p.isNative())) {
 			return vanillaLimit;
 		}
 		double output = config.targetOutputFps > 0 ? config.targetOutputFps : p.displayHz();

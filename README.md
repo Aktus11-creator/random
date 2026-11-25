@@ -35,6 +35,9 @@ presenter (own thread)    ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ �
   so F2 screenshots and other mods see the normal frame.
 - **Safe fallbacks.** Menus, loading screens and post effects (spectator mob views, entity outlines) are handled.
   If the presenter ever fails, the game falls back to vanilla presentation automatically.
+- **Never slower than needed.** If the game already renders about one real frame per display refresh, FrameGen
+  switches to *native* presentation. It shows the real frames as they are, with no warping and no added latency,
+  and resumes generating as soon as the game falls behind.
 - In-game settings screen (also via Mod Menu), hotkeys, and an optional stats line.
 
 ## Requirements
@@ -54,7 +57,7 @@ presenter (own thread)    ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ �
 1. Install Fabric Loader for 26.3 and Fabric API.
 2. Drop `framegen-<version>.jar` into `.minecraft/mods`.
 3. Optional, for the best results: turn **V-Sync on**. The presenter then paces itself to the display. Leave
-   *Max Framerate* at "Unlimited"; FrameGen caps the real frame rate itself (see *Multiplier*).
+   *Max Framerate* at "Unlimited"; FrameGen limits the real frame rate itself (see *Real FPS Limit*).
 
 ## Controls
 
@@ -73,13 +76,13 @@ Rebind them under *Options → Controls → Key Binds → FrameGen*.
 |---|---|
 | Frame Generation | Master switch. When off, frames pass straight through. |
 | Mode | Interpolate (smoothest) or Extrapolate (lowest latency). |
-| Quality | Solver iterations per pixel and disocclusion background search. Low / Medium / High / Ultra. |
-| Multiplier | Caps the real frame rate to `output / multiplier` (2× by default). This leaves GPU time for the presenter and gives it evenly spaced input. "Game limit" uses your Max Framerate instead. |
+| Quality | Solver iterations per pixel and disocclusion background search. Low / **Medium** (default) / High / Ultra. The solver stops early once a pixel has converged, so higher tiers mostly cost more around edges. |
+| Real FPS Limit | **Display rate** (default) means the game never renders more real frames than your display shows. FrameGen only fills in when the game drops below that. *1/2 display* and lower trade real frames for GPU headroom; use them only if the game stutters. *Game limit* uses your Max Framerate. |
 | Output FPS | Presentation rate when V-Sync is off ("Display" = refresh rate). |
 | Sharp HUD and Hand | Keeps HUD and hand out of the reprojection. Disable only if another mod's HUD looks wrong. |
 | Max Prediction | How far past the newest real frame the camera may be predicted. |
 | Low Latency Present | Waits for each present to complete. This gives lower latency and steadier pacing on most drivers. |
-| Show Stats | `FrameGen 144 fps (real 72) | Interpolate | delay 21 ms | present 0.3 ms` |
+| Show Stats | `FrameGen 144 fps (real 72) | Interpolate | delay 21 ms | present 0.3 ms`, or `FrameGen native` when the game already keeps up. |
 | Debug View | Tints pixels the reprojection couldn't reconstruct confidently in magenta. |
 
 The settings are stored in `config/framegen.json`.
@@ -164,6 +167,18 @@ Verified in the dev environment with Sodium 0.9.3 + Nvidium 0.4.4-beta8:
 
 Nvidium only enables itself on NVIDIA GPUs with mesh shaders. The test machine has none, so there Nvidium stayed
 disabled; its rendering path was checked by code review, not by running it.
+
+## Changelog
+
+**1.2.0**
+- The real frame rate is no longer capped at half the display rate by default, which made fast PCs render far
+  fewer real frames than they could. The new default is the display rate, and existing configs are migrated.
+- New native mode: no generation while the game already keeps up with the display.
+- The reprojection shader is about 5× cheaper at the same quality: early-exit solver, `textureGather` depth
+  fetches, and the second frame is skipped when it doesn't contribute. Measured as 24.1 → 4.8 ms/frame on the
+  software test GPU, while still reconstructing 91% of pixels at 46 dB for a 10° turn. The default quality tier is
+  now Medium.
+- The log now warns if the presenter stops keeping up or GPU frames never finish, to help diagnose freezes.
 
 ## Limitations
 

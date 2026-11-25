@@ -41,12 +41,15 @@ public final class FrameGenConfig {
 	/** Master switch. When off, frames are passed through unchanged. */
 	public volatile boolean enabled = true;
 	public volatile Mode mode = Mode.INTERPOLATE;
-	public volatile Quality quality = Quality.HIGH;
+	public volatile Quality quality = Quality.MEDIUM;
 	/**
-	 * Real (rendered) frames per generated output frame. The game is capped to {@code outputRate / multiplier}
-	 * real frames per second, leaving GPU time for the presenter. 0 = don't cap, use the game's own limit.
+	 * Real frame rate limit while generating, as a divisor of the output rate: 1 = never render more real frames
+	 * than the display shows (default), 2 = half the display rate, ... 0 = use the game's own Max Framerate.
 	 */
-	public volatile int multiplier = 2;
+	public volatile int multiplier = 1;
+	/** Lets {@link #load()} migrate settings whose meaning changed. */
+	public int configVersion; // 0 when absent from an old file
+
 	/** Output frame rate when V-Sync is off. 0 = match the display refresh rate. */
 	public volatile int targetOutputFps = 0;
 	/** Keep the HUD and first-person hand crisp (rendered unwarped on top of the generated world). */
@@ -60,6 +63,7 @@ public final class FrameGenConfig {
 	/** Debug view: tint generated pixels by how well the reprojection converged. */
 	public volatile boolean debugView = false;
 
+	private static final int CURRENT_VERSION = 2;
 	private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 	private static FrameGenConfig instance;
 
@@ -80,6 +84,15 @@ public final class FrameGenConfig {
 			try (Reader reader = Files.newBufferedReader(file)) {
 				FrameGenConfig cfg = GSON.fromJson(reader, FrameGenConfig.class);
 				if (cfg != null) {
+					if (cfg.configVersion < 2) {
+						// 1.0/1.1 defaulted to capping the game at half the display rate, which made fast machines
+						// render far fewer real frames than they could. Reset to the new default.
+						cfg.multiplier = 1;
+						if (cfg.quality == Quality.HIGH) cfg.quality = Quality.MEDIUM; // old default, now the costlier tier
+						cfg.configVersion = CURRENT_VERSION;
+						cfg.sanitize();
+						cfg.save();
+					}
 					cfg.sanitize();
 					return cfg;
 				}
@@ -88,14 +101,15 @@ public final class FrameGenConfig {
 			}
 		}
 		FrameGenConfig cfg = new FrameGenConfig();
+		cfg.configVersion = CURRENT_VERSION;
 		cfg.save();
 		return cfg;
 	}
 
 	private void sanitize() {
 		if (this.mode == null) this.mode = Mode.INTERPOLATE;
-		if (this.quality == null) this.quality = Quality.HIGH;
-		if (this.multiplier < 0 || this.multiplier > 8) this.multiplier = 2;
+		if (this.quality == null) this.quality = Quality.MEDIUM;
+		if (this.multiplier < 0 || this.multiplier > 8) this.multiplier = 1;
 		if (this.targetOutputFps < 0 || this.targetOutputFps > 1000) this.targetOutputFps = 0;
 		if (!(this.maxExtrapolation >= 0.0f) || this.maxExtrapolation > 3.0f) this.maxExtrapolation = 1.0f;
 	}

@@ -31,6 +31,7 @@ final class FrameGenSurface implements GpuSurface {
 	private boolean blitted;
 	private boolean fallback;
 	private boolean closed;
+	private int stalls;
 	/** Other mods' {@code GlSurface.present} injections, re-run here because the game no longer calls it. */
 	private final PresentHookReplayer presentHooks;
 
@@ -152,10 +153,17 @@ final class FrameGenSurface implements GpuSurface {
 
 		// Without generation the presenter shows each frame exactly once; emulate V-Sync's blocking swap so the game
 		// doesn't render frames nobody will see.
-		boolean passthrough = record.opaque || !FrameGenConfig.get().enabled;
+		boolean passthrough = record.opaque || !FrameGenConfig.get().enabled || this.presenter.isNative();
 		boolean vsync = this.configuration.map(c -> c.presentMode() == PresentMode.FIFO).orElse(false);
 		if (passthrough && vsync) {
-			this.exchange.awaitDisplayed(record.id, 1, 100L);
+			if (!this.exchange.awaitDisplayed(record.id, 1, 100L)) {
+				// The presenter didn't show the previous frame within 100 ms: menus would feel frozen. Log it so it
+				// can be diagnosed from latest.log.
+				if (this.stalls++ % 200 == 0) {
+					FrameGenMod.LOGGER.warn("FrameGen presenter is not keeping up with the game (frame {} not shown after 100 ms, {} stalls so far). "
+						+ "If menus or the game feel frozen, please report this with your latest.log.", record.id - 1, this.stalls);
+				}
+			}
 		}
 	}
 

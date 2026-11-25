@@ -60,12 +60,21 @@ float fetchDepth(sampler2D depthTex, vec2 size, vec2 s) {
     vec2 p = (s * 0.5 + 0.5) * size - 0.5;
     vec2 base = floor(p);
     vec2 f = p - base;
+#ifdef HAS_GATHER
+    // One fetch for the 2x2 footprint (clamp-to-edge sampler == clamped texel indices).
+    vec4 g = textureGather(depthTex, (base + 1.0) / size);
+    float d00 = g.w;
+    float d10 = g.z;
+    float d01 = g.x;
+    float d11 = g.y;
+#else
     ivec2 i0 = ivec2(clamp(base, vec2(0.0), size - 1.0));
     ivec2 i1 = ivec2(clamp(base + 1.0, vec2(0.0), size - 1.0));
     float d00 = texelFetch(depthTex, i0, 0).r;
     float d10 = texelFetch(depthTex, ivec2(i1.x, i0.y), 0).r;
     float d01 = texelFetch(depthTex, ivec2(i0.x, i1.y), 0).r;
     float d11 = texelFetch(depthTex, i1, 0).r;
+#endif
     float lo = min(min(d00, d10), min(d01, d11));
     float hi = max(max(d00, d10), max(d01, d11));
     // Reversed-Z: depth ~ near / distance, so a relative spread compares distances regardless of range.
@@ -74,6 +83,11 @@ float fetchDepth(sampler2D depthTex, vec2 size, vec2 s) {
     }
     vec2 n = step(0.5, f);
     return n.y < 0.5 ? (n.x < 0.5 ? d00 : d10) : (n.x < 0.5 ? d01 : d11);
+}
+
+float fetchDepthNearest(sampler2D depthTex, vec2 size, vec2 s) {
+    ivec2 px = ivec2(clamp(floor((s * 0.5 + 0.5) * size), vec2(0.0), size - 1.0));
+    return texelFetch(depthTex, px, 0).r;
 }
 
 // Maps source point s (NDC xy) with source depth d into the target frame; returns target clip coordinates.
@@ -92,18 +106,23 @@ Candidate reproject(sampler2D colorTex, sampler2D depthTex, vec2 size, mat4 fwd,
     vec4 g = invRot * vec4(t, 0.5, 1.0);
     vec2 s0 = g.w > EPS_W ? g.xy / g.w : t;
     vec2 s = s0;
-    for (int i = 0; i < uIterations; i++) {
-        float d = fetchDepth(depthTex, size, s);
+    float d = 0.0;
+    float err = 1e4;
+    // Each step measures the residual of the current guess (that's the convergence check, for free) and stops as
+    // soon as it is below a twentieth of a pixel; smooth surfaces converge in one or two steps.
+    for (int i = 0; i <= uIterations; i++) {
+        d = fetchDepth(depthTex, size, s);
         vec4 p = forwardMap(fwd, fwdRot, s, d);
-        if (p.w <= EPS_W) break;
+        if (p.w <= EPS_W) {
+            err = 1e4;
+            break;
+        }
+        err = length((p.xy / p.w - t) * uOutSize * 0.5);
+        if (err < 0.05 || i == uIterations) break;
         vec4 q = (d <= 0.0 ? invRot : inv) * vec4(t, p.z / p.w, 1.0);
         if (q.w <= EPS_W) break;
         s = q.xy / q.w;
     }
-
-    float d = fetchDepth(depthTex, size, s);
-    vec4 p = forwardMap(fwd, fwdRot, s, d);
-    float err = p.w > EPS_W ? length((p.xy / p.w - t) * uOutSize * 0.5) : 1e4;
 
     if (uBackgroundSearch == 1 && err > ERR_GOOD) {
         // Disocclusion: the iteration got pulled onto a foreground edge. Probe along the search direction for the
@@ -116,7 +135,7 @@ Candidate reproject(sampler2D colorTex, sampler2D depthTex, vec2 size, mat4 fwd,
         for (int k = -3; k <= 3; k++) {
             if (k == 0) continue;
             vec2 sk = s + dir * float(k) * 2.0;
-            float dk = fetchDepth(depthTex, size, sk);
+            float dk = fetchDepthNearest(depthTex, size, sk);
             if (dk < bestD) { // reversed-Z: smaller = farther
                 bestD = dk;
                 bestS = sk;
@@ -162,32 +181,46 @@ float confidence(float err) {
 void main() {
     vec2 t = vUv * 2.0 - 1.0;
 
-    Candidate cb = reproject(uColorB, uDepthB, uSizeB, uFwdB, uFwdRotB, uInvB, uInvRotB, t);
-    vec3 world = cb.color;
-    float shownErr = cb.err;
-
+    vec3 world;
+    float shownErr;
     if (uUseA == 1) {
-        Candidate ca = reproject(uColorA, uDepthA, uSizeA, uFwdA, uFwdRotA, uInvA, uInvRotA, t);
-        float confA = confidence(ca.err);
-        float confB = confidence(cb.err);
-        float wA = uWeightA * confA;
-        float wB = (1.0 - uWeightA) * confB;
-        // Things that moved on their own (mobs, particles, animated textures) disagree between the two frames even
-        // where the reprojection is perfect. Cross-fading would show two half-transparent copies, so snap to the
-        // temporally nearer frame instead.
-        vec3 diff = abs(ca.color - cb.color);
-        if (max(diff.r, max(diff.g, diff.b)) > 0.12) {
-            if (uWeightA >= 0.5) { wB *= 0.02; } else { wA *= 0.02; }
+        // Evaluate the temporally dominant frame first; the other one only if it carries real weight or the first
+        // could not reconstruct this pixel (disocclusion fill). Halves the cost for most pixels near t = 0 or 1.
+        bool aFirst = uWeightA >= 0.5;
+        float wFirst = aFirst ? uWeightA : 1.0 - uWeightA;
+        Candidate c1 = aFirst
+            ? reproject(uColorA, uDepthA, uSizeA, uFwdA, uFwdRotA, uInvA, uInvRotA, t)
+            : reproject(uColorB, uDepthB, uSizeB, uFwdB, uFwdRotB, uInvB, uInvRotB, t);
+        float conf1 = confidence(c1.err);
+        world = c1.color;
+        shownErr = c1.err;
+        if (1.0 - wFirst > 0.02 || conf1 < 0.999) {
+            Candidate c2 = aFirst
+                ? reproject(uColorB, uDepthB, uSizeB, uFwdB, uFwdRotB, uInvB, uInvRotB, t)
+                : reproject(uColorA, uDepthA, uSizeA, uFwdA, uFwdRotA, uInvA, uInvRotA, t);
+            float conf2 = confidence(c2.err);
+            float w1 = wFirst * conf1;
+            float w2 = (1.0 - wFirst) * conf2;
+            // Things that moved on their own (mobs, particles, animated textures) disagree between the two frames
+            // even where the reprojection is perfect. Cross-fading would show two half-transparent copies, so snap
+            // to the temporally nearer frame (c1) instead.
+            vec3 diff = abs(c1.color - c2.color);
+            if (max(diff.r, max(diff.g, diff.b)) > 0.12) {
+                w2 *= 0.02;
+            }
+            float sum = w1 + w2;
+            if (sum > 1e-4) {
+                world = (c1.color * w1 + c2.color * w2) / sum;
+            } else {
+                // Neither frame is confident: take whichever reprojection is less wrong.
+                world = c1.err <= c2.err ? c1.color : c2.color;
+            }
+            shownErr = min(c1.err, c2.err);
         }
-        float sum = wA + wB;
-        if (sum > 1e-4) {
-            world = (ca.color * wA + cb.color * wB) / sum;
-            shownErr = min(ca.err, cb.err);
-        } else {
-            // Neither frame is confident: take whichever reprojection is less wrong.
-            world = ca.err < cb.err ? ca.color : cb.color;
-            shownErr = min(ca.err, cb.err);
-        }
+    } else {
+        Candidate cb = reproject(uColorB, uDepthB, uSizeB, uFwdB, uFwdRotB, uInvB, uInvRotB, t);
+        world = cb.color;
+        shownErr = cb.err;
     }
 
     if (uDebug == 1) {

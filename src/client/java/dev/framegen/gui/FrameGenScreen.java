@@ -99,7 +99,7 @@ public final class FrameGenScreen extends OptionsSubScreen {
 	private static OptionInstance<Integer> multiplierOption(FrameGenConfig c) {
 		String key = "framegen.option.multiplier";
 		return new OptionInstance<>(key, tooltip(key), (caption, value) -> Options.genericValueLabel(caption,
-			value == 0 ? Component.translatable("framegen.multiplier.off") : Component.translatable("framegen.multiplier.value", value)),
+			value == 0 ? Component.translatable("framegen.multiplier.off") : value == 1 ? Component.translatable("framegen.multiplier.display") : Component.translatable("framegen.multiplier.value", value)),
 			new OptionInstance.IntRange(0, 4), c.multiplier, v -> {
 				c.multiplier = v;
 				c.save();
