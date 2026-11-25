@@ -4,11 +4,14 @@
 	"key.framegen.mode": "Switch interpolation / extrapolation",
 	"key.framegen.stats": "Show frame generation stats",
 	"key.framegen.settings": "Open FrameGen settings",
+	"key.framegen.snapshot": "Save debug snapshot (for bug reports)",
 
 	"framegen.settings.title": "Frame Generation",
 	"framegen.message.enabled": "Frame generation: ON",
 	"framegen.message.disabled": "Frame generation: OFF",
 	"framegen.message.mode": "Frame generation mode: %s",
+	"framegen.message.snapshot": "FrameGen debug snapshot saved to %s",
+	"framegen.message.snapshot_unavailable": "FrameGen is not running, nothing to snapshot",
 
 	"framegen.mode.interpolate": "Interpolate",
 	"framegen.mode.extrapolate": "Extrapolate",

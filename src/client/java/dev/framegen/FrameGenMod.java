@@ -27,6 +27,7 @@ public final class FrameGenMod implements ClientModInitializer {
 	private static KeyMapping modeKey;
 	private static KeyMapping statsKey;
 	private static KeyMapping settingsKey;
+	private static KeyMapping snapshotKey;
 
 	@Override
 	public void onInitializeClient() {
@@ -37,6 +38,7 @@ public final class FrameGenMod implements ClientModInitializer {
 		modeKey = KeyMappingHelper.registerKeyMapping(new KeyMapping("key.framegen.mode", InputConstants.UNKNOWN.getValue(), CATEGORY));
 		statsKey = KeyMappingHelper.registerKeyMapping(new KeyMapping("key.framegen.stats", InputConstants.UNKNOWN.getValue(), CATEGORY));
 		settingsKey = KeyMappingHelper.registerKeyMapping(new KeyMapping("key.framegen.settings", InputConstants.UNKNOWN.getValue(), CATEGORY));
+		snapshotKey = KeyMappingHelper.registerKeyMapping(new KeyMapping("key.framegen.snapshot", InputConstants.KEY_F9, CATEGORY));
 		ClientTickEvents.END_CLIENT_TICK.register(FrameGenMod::handleKeys);
 
 		HudElementRegistry.addLast(Identifier.fromNamespaceAndPath(MOD_ID, "stats"), (graphics, deltaTracker) -> {
@@ -62,6 +64,14 @@ public final class FrameGenMod implements ClientModInitializer {
 		while (statsKey.consumeClick()) {
 			config.showStats = !config.showStats;
 			config.save();
+		}
+		while (snapshotKey.consumeClick()) {
+			var capture = FrameGenEngine.capture();
+			if (capture != null) {
+				capture.requestSnapshot();
+			} else {
+				notify(mc, Component.translatable("framegen.message.snapshot_unavailable"));
+			}
 		}
 		while (settingsKey.consumeClick()) {
 			mc.gui.setScreen(new FrameGenScreen(mc.gui.screen()));

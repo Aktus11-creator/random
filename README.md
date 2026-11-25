@@ -170,6 +170,16 @@ disabled; its rendering path was checked by code review, not by running it.
 
 ## Changelog
 
+**1.4.2**
+- **Fixes the invisible first-person hand** (and other silently missing layers) on some setups. Minecraft 26.3's
+  OpenGL backend has a bug: reading back a depth texture leaves its shared read framebuffer reading nothing, so
+  every later colour copy through it copies nothing. If any mod read depth during a frame, FrameGen's hand copy
+  came out empty and the hand was erased from the real frame. FrameGen now fixes that state after depth readbacks
+  (which helps other mods too), and does all of its own colour copies as render passes, so they no longer depend
+  on that shared state.
+- New **F9 debug snapshot**. It saves every FrameGen layer of one frame as PNGs, plus an info file, to
+  `.minecraft/framegen-debug/`, for bug reports.
+
 **1.4.1**
 - Reverted the 1.3.1 latency changes. Interpolate is the default again (configs switched to Extrapolate by
   1.3.1 are switched back), and Extrapolate uses its original timing. Extrapolation wasn't smooth at low frame

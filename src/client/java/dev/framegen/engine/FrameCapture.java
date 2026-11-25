@@ -88,6 +88,8 @@ public final class FrameCapture {
 	private @Nullable GpuTextureView baseImage;
 	private @Nullable GpuTextureView guiCopy;
 	private @Nullable GpuTextureView handRaw;
+	private boolean snapshotRequested;
+	private @Nullable DebugSnapshot snapshot;
 	private int framesWithoutRedirect;
 	private boolean redirectLogged;
 	private boolean levelProjectionSet;
@@ -127,6 +129,23 @@ public final class FrameCapture {
 		FrameGenConfig config = FrameGenConfig.get();
 		this.splitPlanned = config.enabled && FrameGenEngine.isPresenterRunning() && mc.level != null && mc.gui.screen() == null && mc.gui.overlay() == null
 			&& !this.redirectActive;
+		if (this.snapshotRequested && this.splitPlanned) {
+			this.snapshotRequested = false;
+			this.snapshot = new DebugSnapshot();
+			FrameGenConfig c = FrameGenConfig.get();
+			this.snapshot.note("FrameGen debug snapshot");
+			this.snapshot.note("config: enabled=" + c.enabled + " mode=" + c.mode + " quality=" + c.quality + " sharpHud=" + c.sharpHud
+				+ " multiplier=" + c.multiplier + " targetOutputFps=" + c.targetOutputFps);
+			this.snapshot.note("window: " + mc.getWindow().getWidth() + "x" + mc.getWindow().getHeight() + " guiScale=" + mc.getWindow().getGuiScale()
+				+ " | " + FrameGenEngine.describeWindow());
+			this.snapshot.note("device: " + RenderSystem.getDevice().getDeviceInfo().name() + " / " + RenderSystem.getDevice().getDeviceInfo().driverInfo()
+				+ " zZeroToOne=" + this.zZeroToOne);
+		}
+	}
+
+	/** Debug: save this frame's layers as PNGs (next frame that splits layers). */
+	public void requestSnapshot() {
+		this.snapshotRequested = true;
 	}
 
 	/** True while another mod substitutes the presented image (frame generation is paused meanwhile). */
@@ -169,6 +188,10 @@ public final class FrameCapture {
 	 * the world is box-filtered down instead, so the presenter works at native resolution and memory use stays flat.
 	 */
 	public void beforeHand(CameraRenderState camera, boolean consistentDepthRequired) {
+		if (this.snapshot != null) {
+			this.snapshot.note("A beforeHand: splitPlanned=" + this.splitPlanned + " record=" + (this.record != null) + " projectionSet=" + this.levelProjectionSet
+				+ " panoramic=" + camera.isPanoramicMode + " consistentDepthRequired=" + consistentDepthRequired);
+		}
 		if (!this.splitPlanned || this.record == null || !this.levelProjectionSet || camera.isPanoramicMode) return;
 		Minecraft mc = Minecraft.getInstance();
 		RenderTarget main = mc.gameRenderer.mainRenderTarget();
@@ -185,11 +208,13 @@ public final class FrameCapture {
 		this.scaled = main.width != nw || main.height != nh;
 		CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
 		if (!this.scaled) {
-			encoder.copyTextureToTexture(color, slot.color, 0, 0, 0, 0, 0, nw, nh);
-			encoder.copyTextureToTexture(depth, slot.depth, 0, 0, 0, 0, 0, nw, nh);
+			// Copies are render passes, not copyTextureToTexture: those go through a shared read framebuffer whose
+			// state other code can leave broken (see GlCommandEncoderMixin). At 1:1 the box filter is an exact copy.
+			this.downsample(encoder, main.getColorTextureView(), slot.colorView);
+			this.downsampleDepth(encoder, main.getDepthTextureView(), slot.depthView);
 		} else {
 			this.hiresWorld = this.ensureTemp(this.hiresWorld, "FrameGen hi-res world", main.width, main.height);
-			encoder.copyTextureToTexture(color, this.hiresWorld.texture(), 0, 0, 0, 0, 0, main.width, main.height);
+			this.downsample(encoder, main.getColorTextureView(), this.hiresWorld);
 			this.downsample(encoder, main.getColorTextureView(), slot.colorView);
 			this.downsampleDepth(encoder, main.getDepthTextureView(), slot.depthView);
 		}
@@ -208,6 +233,12 @@ public final class FrameCapture {
 
 		// With post effects active the hand is integrated into the processed image; keep it in the world layer.
 		this.handSplit = FrameGenConfig.get().sharpHud && !consistentDepthRequired;
+		if (this.snapshot != null) {
+			this.snapshot.note("A main target " + main.width + "x" + main.height + " (" + System.identityHashCode(main) + ") scaled=" + this.scaled
+				+ " worldSlot=" + slot.width + "x" + slot.height + " handSplit=" + this.handSplit);
+			this.snapshot.capture(color, "A_main_world_before_hand");
+			this.snapshot.capture(this.worldSlot.color, "A_world_slot");
+		}
 		if (this.handSplit) {
 			encoder.clearColorTexture(color, TRANSPARENT);
 		}
@@ -215,6 +246,13 @@ public final class FrameCapture {
 
 	/** Hook B: end of {@code GameRenderer.renderLevel}. */
 	public void afterLevel() {
+		if (this.snapshot != null) {
+			RenderTarget now = Minecraft.getInstance().gameRenderer.mainRenderTarget();
+			this.snapshot.note("B afterLevel: handSplit=" + this.handSplit + " worldSlot=" + (this.worldSlot != null) + " levelTarget=" + (this.levelTarget != null)
+				+ " mainNow=" + System.identityHashCode(now) + " sameAsLevelTarget=" + (now == this.levelTarget));
+			this.snapshot.capture(now.getColorTexture(), "B_main_after_hand_pass");
+			this.snapshot.capture(now.getDepthTexture(), "B_main_depth_after_hand_pass");
+		}
 		if (!this.handSplit || this.worldSlot == null || this.levelTarget == null) return;
 		RenderTarget main = this.levelTarget;
 		GpuTextureView mainColor = main.getColorTextureView();
@@ -229,7 +267,7 @@ public final class FrameCapture {
 		});
 		// Put the world back underneath the hand so everything after this point sees the vanilla image.
 		this.handRaw = this.ensureTemp(this.handRaw, "FrameGen hand (full size)", main.width, main.height);
-		encoder.copyTextureToTexture(main.getColorTexture(), this.handRaw.texture(), 0, 0, 0, 0, 0, main.width, main.height);
+		this.downsample(encoder, mainColor, this.handRaw);
 		GpuTextureView world = this.scaled ? this.hiresWorld : this.worldSlot.colorView;
 		GpuTextureView hand = this.handRaw;
 		this.fullscreenPass(encoder, "FrameGen restore world", mainColor, FrameGenPipelines.HAND_RESTORE, pass -> {
@@ -237,21 +275,24 @@ public final class FrameCapture {
 			pass.setUniform("WorldSampler", world, nearest());
 			pass.setUniform("DepthSampler", mainDepth, nearest());
 		});
+		if (this.snapshot != null) {
+			this.snapshot.capture(this.handTexture, "B_hand_layer");
+			this.snapshot.capture(main.getColorTexture(), "B_main_restored");
+		}
 	}
 
 	/** Hook B2: after entity outlines and post effects were applied to the main target. */
 	public void afterPostEffects(boolean postEffectsApplied) {
 		if (!this.worldCaptured || this.worldSlot == null || this.levelTarget == null) return;
 		LevelRendererAccessor levelRenderer = (LevelRendererAccessor) Minecraft.getInstance().levelRenderer;
+		if (this.snapshot != null) {
+			this.snapshot.note("B2 afterPostEffects: postEffects=" + postEffectsApplied + " entityOutline=" + levelRenderer.framegen$rendersEntityOutline());
+		}
 		if (postEffectsApplied || levelRenderer.framegen$rendersEntityOutline()) {
 			// Something drew over the hand: the separated layers no longer add up. Bake everything into the world.
 			RenderTarget main = this.levelTarget;
 			CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
-			if (!this.scaled) {
-				encoder.copyTextureToTexture(main.getColorTexture(), this.worldSlot.color, 0, 0, 0, 0, 0, main.width, main.height);
-			} else {
-				this.downsample(encoder, main.getColorTextureView(), this.worldSlot.colorView);
-			}
+			this.downsample(encoder, main.getColorTextureView(), this.worldSlot.colorView);
 			this.handSplit = false;
 		}
 	}
@@ -266,9 +307,14 @@ public final class FrameCapture {
 		RenderTarget current = Minecraft.getInstance().gameRenderer.mainRenderTarget();
 		if (current.getColorTexture() == null) return;
 		CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
+		if (this.snapshot != null) {
+			this.snapshot.note("C beforeGui: current=" + System.identityHashCode(current) + " " + current.width + "x" + current.height
+				+ " swapped=" + (current != this.levelTarget));
+			this.snapshot.capture(current.getColorTexture(), "C_gui_target_before_clear");
+		}
 		if (current != this.levelTarget) {
 			this.baseImage = this.ensureTemp(this.baseImage, "FrameGen base image", current.width, current.height);
-			encoder.copyTextureToTexture(current.getColorTexture(), this.baseImage.texture(), 0, 0, 0, 0, 0, current.width, current.height);
+			this.downsample(encoder, current.getColorTextureView(), this.baseImage);
 			this.baseCaptured = true;
 		}
 		encoder.clearColorTexture(current.getColorTexture(), TRANSPARENT);
@@ -318,6 +364,13 @@ public final class FrameCapture {
 			this.redirectActive = false;
 		}
 		boolean layered = this.worldCaptured && this.worldSlot != null && !lost && this.worldSlot.width == w && this.worldSlot.height == h;
+		if (this.snapshot != null) {
+			this.snapshot.note("D finishFrame: presented " + w + "x" + h + " isGuiTarget=" + (presented == this.guiTarget) + " guiSplit=" + this.guiSplit
+				+ " handSplit=" + this.handSplit + " baseCaptured=" + this.baseCaptured + " lost=" + lost + " layered=" + layered
+				+ " vignette=" + this.vignetteIntercepted + " crosshairQuads=" + this.pendingQuads.size());
+			this.snapshot.capture(presented, "D_presented_before_compose");
+			this.snapshot.capture(this.baseImage != null && this.baseCaptured ? this.baseImage.texture() : null, "D_base_image");
+		}
 		if (this.guiSplit && !lost && !layered) {
 			// GUI was split but the layers can't be used this frame (size changed mid-frame): still rebuild the image.
 			GpuTextureView vignette = this.vignetteIntercepted && this.vignetteView != null ? this.vignetteView : this.blankView();
@@ -339,7 +392,7 @@ public final class FrameCapture {
 				// HUD separation disabled: the whole frame minus the world is not separable, so the overlay is empty
 				// and the world layer is the full image (HUD gets warped with the world).
 				encoder.clearColorTexture(overlay.color, TRANSPARENT);
-				encoder.copyTextureToTexture(presented, this.worldSlot.color, 0, 0, 0, 0, 0, w, h);
+				this.downsample(encoder, mainColor, this.worldSlot.colorView);
 			}
 			r.opaque = false;
 			r.world = this.worldSlot;
@@ -353,9 +406,12 @@ public final class FrameCapture {
 			if (this.worldSlot != null) {
 				this.exchange.abandon(this.worldSlot);
 			}
-			encoder.copyTextureToTexture(presented, overlay.color, 0, 0, 0, 0, 0, w, h);
+			this.downsample(encoder, mainColor, overlay.colorView);
 			r.opaque = true;
 			r.world = null;
+		}
+		if (this.snapshot != null) {
+			this.snapshot.capture(overlay.color, "D_overlay_for_presenter");
 		}
 		this.worldSlot = null;
 		r.overlay = overlay;
@@ -367,9 +423,18 @@ public final class FrameCapture {
 			this.replayQuads(encoder, mainColor, r, guiScale, w, h);
 			if (r.opaque) {
 				// The overlay is the full image: it must contain the crosshair too.
-				encoder.copyTextureToTexture(presented, overlay.color, 0, 0, 0, 0, 0, w, h);
+				this.downsample(encoder, mainColor, overlay.colorView);
 				r.invertQuads.clear();
 			}
+		}
+		if (this.snapshot != null) {
+			this.snapshot.capture(presented, "D_final_real_frame");
+			this.snapshot.finish();
+			Minecraft mc = Minecraft.getInstance();
+			if (mc.player != null) {
+				mc.player.sendOverlayMessage(net.minecraft.network.chat.Component.translatable("framegen.message.snapshot", this.snapshot.dir().toString()));
+			}
+			this.snapshot = null;
 		}
 		return true;
 	}
@@ -382,7 +447,7 @@ public final class FrameCapture {
 	private void rebuildPresented(CommandEncoder encoder, GpuTextureView target, GpuTextureView vignette, @Nullable GpuTextureView overlay, int w, int h) {
 		if (this.baseCaptured && this.baseImage != null && this.baseImage.getWidth(0) == w && this.baseImage.getHeight(0) == h) {
 			this.guiCopy = this.ensureTemp(this.guiCopy, "FrameGen GUI copy", w, h);
-			encoder.copyTextureToTexture(target.texture(), this.guiCopy.texture(), 0, 0, 0, 0, 0, w, h);
+			this.downsample(encoder, target, this.guiCopy);
 			this.writeCompositeUbo(encoder, 1, true);
 			GpuTextureView gui = this.guiCopy;
 			GpuTextureView base = this.baseImage;
@@ -531,12 +596,28 @@ public final class FrameCapture {
 		return RenderSystem.getDevice().createTextureView(texture);
 	}
 
+	/**
+	 * Copies (1:1, exact) or box-filters {@code source} into {@code target} with a render pass. While resources are
+	 * still loading at startup the pipeline isn't compiled yet; then same-size images fall back to a plain copy.
+	 */
 	private void downsample(CommandEncoder encoder, GpuTextureView source, GpuTextureView target) {
+		if (RenderSystem.getCompiledPipelineNullable(FrameGenPipelines.DOWNSAMPLE) == null) {
+			int w = Math.min(source.getWidth(0), target.getWidth(0));
+			int h = Math.min(source.getHeight(0), target.getHeight(0));
+			encoder.copyTextureToTexture(source.texture(), target.texture(), 0, 0, 0, 0, 0, w, h);
+			return;
+		}
 		this.fullscreenPass(encoder, "FrameGen downsample", target, FrameGenPipelines.DOWNSAMPLE, pass ->
 			pass.setUniform("InSampler", source, nearest()));
 	}
 
 	private void downsampleDepth(CommandEncoder encoder, GpuTextureView source, GpuTextureView targetDepth) {
+		if (RenderSystem.getCompiledPipelineNullable(FrameGenPipelines.DOWNSAMPLE_DEPTH) == null) {
+			int w = Math.min(source.getWidth(0), targetDepth.getWidth(0));
+			int h = Math.min(source.getHeight(0), targetDepth.getHeight(0));
+			encoder.copyTextureToTexture(source.texture(), targetDepth.texture(), 0, 0, 0, 0, 0, w, h);
+			return;
+		}
 		RenderPassDescriptor descriptor = RenderPassDescriptor.builder(() -> "FrameGen downsample depth").withDepthAttachment(targetDepth).build();
 		try (RenderPass pass = encoder.createRenderPass(descriptor)) {
 			pass.setUniform("InSampler", source, nearest());

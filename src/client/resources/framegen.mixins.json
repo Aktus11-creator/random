@@ -11,6 +11,7 @@
 		"GameRendererAccessor",
 		"LevelRendererAccessor",
 		"GuiGraphicsExtractorMixin",
+		"GlCommandEncoderMixin",
 		"compat.SupersampleTargetFpsMixin"
 	],
 	"injectors": {
