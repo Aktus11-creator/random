@@ -1,0 +1,1 @@
+{"schemaVersion":1,"id":"fakess","version":"0.0.1","name":"FakeSS (FrameGen test)","environment":"client","mixins":["fakess.mixins.json"],"depends":{"minecraft":"~26.3"}}
