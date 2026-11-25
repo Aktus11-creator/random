@@ -7,6 +7,7 @@ import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.renderpearl.api.buffers.GpuBuffer;
 import com.mojang.renderpearl.api.commands.CommandEncoder;
 import com.mojang.renderpearl.api.commands.RenderPass;
+import com.mojang.renderpearl.api.commands.RenderPassDescriptor;
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import com.mojang.renderpearl.api.textures.FilterMode;
 import com.mojang.renderpearl.api.textures.GpuSampler;
@@ -75,6 +76,17 @@ public final class FrameCapture {
 	 * splitting then can't work, so frames are passed through unchanged until it stops for a while.
 	 */
 	private boolean redirectActive;
+	/** The main target the level was rendered into this frame (hook A). */
+	private @Nullable RenderTarget levelTarget;
+	/** True if that target is larger than the window (supersampling): layers are downscaled to native size. */
+	private boolean scaled;
+	/** The texture the GUI was drawn into (hook C). */
+	private @Nullable GpuTexture guiTarget;
+	/** A resolution-scaling mod's own native-size image of world + hand, taken just before the GUI (hook C). */
+	private boolean baseCaptured;
+	private @Nullable GpuTextureView hiresWorld;
+	private @Nullable GpuTextureView baseImage;
+	private @Nullable GpuTextureView guiCopy;
 	private int framesWithoutRedirect;
 	private boolean redirectLogged;
 	private boolean levelProjectionSet;
@@ -150,20 +162,36 @@ public final class FrameCapture {
 		this.levelProjectionSet = true;
 	}
 
-	/** Hook A. */
+	/**
+	 * Hook A. Captures the world layer at the window's native resolution. Normally the main target already is that
+	 * size and this is a plain copy. If a resolution-scaling mod (e.g. a supersampler) made the main target larger,
+	 * the world is box-filtered down instead, so the presenter works at native resolution and memory use stays flat.
+	 */
 	public void beforeHand(CameraRenderState camera, boolean consistentDepthRequired) {
 		if (!this.splitPlanned || this.record == null || !this.levelProjectionSet || camera.isPanoramicMode) return;
-		RenderTarget main = Minecraft.getInstance().gameRenderer.mainRenderTarget();
+		Minecraft mc = Minecraft.getInstance();
+		RenderTarget main = mc.gameRenderer.mainRenderTarget();
 		GpuTexture color = main.getColorTexture();
 		GpuTexture depth = main.getDepthTexture();
-		if (color == null || depth == null) return;
+		if (color == null || depth == null || main.getColorTextureView() == null || main.getDepthTextureView() == null) return;
 
-		GpuSlot slot = this.exchange.acquire(GpuSlot.Kind.WORLD, main.width, main.height, 30L);
+		int nw = Math.max(1, mc.getWindow().getWidth());
+		int nh = Math.max(1, mc.getWindow().getHeight());
+		GpuSlot slot = this.exchange.acquire(GpuSlot.Kind.WORLD, nw, nh, 30L);
 		if (slot == null) return;
 		this.worldSlot = slot;
+		this.levelTarget = main;
+		this.scaled = main.width != nw || main.height != nh;
 		CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
-		encoder.copyTextureToTexture(color, slot.color, 0, 0, 0, 0, 0, main.width, main.height);
-		encoder.copyTextureToTexture(depth, slot.depth, 0, 0, 0, 0, 0, main.width, main.height);
+		if (!this.scaled) {
+			encoder.copyTextureToTexture(color, slot.color, 0, 0, 0, 0, 0, nw, nh);
+			encoder.copyTextureToTexture(depth, slot.depth, 0, 0, 0, 0, 0, nw, nh);
+		} else {
+			this.hiresWorld = this.ensureTemp(this.hiresWorld, "FrameGen hi-res world", main.width, main.height);
+			encoder.copyTextureToTexture(color, this.hiresWorld.texture(), 0, 0, 0, 0, 0, main.width, main.height);
+			this.downsample(encoder, main.getColorTextureView(), slot.colorView);
+			this.downsampleDepth(encoder, main.getDepthTextureView(), slot.depthView);
+		}
 		this.worldCaptured = true;
 
 		FrameRecord r = this.record;
@@ -173,7 +201,7 @@ public final class FrameCapture {
 		r.camY = camera.pos.y;
 		r.camZ = camera.pos.z;
 		if (Presenter.DEBUG_LOG) {
-			var hit = Minecraft.getInstance().hitResult;
+			var hit = mc.hitResult;
 			r.debugHitDistance = hit != null && hit.getType() != net.minecraft.world.phys.HitResult.Type.MISS ? hit.getLocation().distanceTo(camera.pos) : Double.NaN;
 		}
 
@@ -186,39 +214,61 @@ public final class FrameCapture {
 
 	/** Hook B: end of {@code GameRenderer.renderLevel}. */
 	public void afterLevel() {
-		if (!this.handSplit || this.worldSlot == null) return;
-		RenderTarget main = Minecraft.getInstance().gameRenderer.mainRenderTarget();
-		this.ensureHandTexture(main.width, main.height);
+		if (!this.handSplit || this.worldSlot == null || this.levelTarget == null) return;
+		RenderTarget main = this.levelTarget;
+		this.ensureHandTexture(this.worldSlot.width, this.worldSlot.height);
 		CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
-		encoder.copyTextureToTexture(main.getColorTexture(), this.handTexture, 0, 0, 0, 0, 0, main.width, main.height);
+		if (!this.scaled) {
+			encoder.copyTextureToTexture(main.getColorTexture(), this.handTexture, 0, 0, 0, 0, 0, main.width, main.height);
+		} else {
+			// Premultiplied colour box-filters correctly.
+			this.downsample(encoder, main.getColorTextureView(), this.handView);
+		}
 		// Put the world back underneath the hand so everything after this point sees the vanilla image.
+		GpuTextureView world = this.scaled ? this.hiresWorld : this.worldSlot.colorView;
 		this.fullscreenPass(encoder, "FrameGen restore world", main.getColorTextureView(), FrameGenPipelines.UNDER, pass ->
-			pass.setUniform("InSampler", this.worldSlot.colorView, nearest()));
+			pass.setUniform("InSampler", world, nearest()));
 	}
 
 	/** Hook B2: after entity outlines and post effects were applied to the main target. */
 	public void afterPostEffects(boolean postEffectsApplied) {
-		if (!this.worldCaptured || this.worldSlot == null) return;
+		if (!this.worldCaptured || this.worldSlot == null || this.levelTarget == null) return;
 		LevelRendererAccessor levelRenderer = (LevelRendererAccessor) Minecraft.getInstance().levelRenderer;
 		if (postEffectsApplied || levelRenderer.framegen$rendersEntityOutline()) {
 			// Something drew over the hand: the separated layers no longer add up. Bake everything into the world.
-			RenderTarget main = Minecraft.getInstance().gameRenderer.mainRenderTarget();
-			RenderSystem.getDevice().createCommandEncoder()
-				.copyTextureToTexture(main.getColorTexture(), this.worldSlot.color, 0, 0, 0, 0, 0, main.width, main.height);
+			RenderTarget main = this.levelTarget;
+			CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
+			if (!this.scaled) {
+				encoder.copyTextureToTexture(main.getColorTexture(), this.worldSlot.color, 0, 0, 0, 0, 0, main.width, main.height);
+			} else {
+				this.downsample(encoder, main.getColorTextureView(), this.worldSlot.colorView);
+			}
 			this.handSplit = false;
 		}
 	}
 
-	/** Hook C: right before the GUI renders. */
+	/**
+	 * Hook C: right before the GUI renders. A resolution-scaling mod may have swapped in a different (native size)
+	 * main target by now, holding its own high-quality downscale of world + hand: keep that as the base image for the
+	 * real frame, then clear the target so the GUI renders onto transparent.
+	 */
 	public void beforeGui() {
 		if (!this.worldCaptured || !FrameGenConfig.get().sharpHud) return;
-		RenderTarget main = Minecraft.getInstance().gameRenderer.mainRenderTarget();
-		RenderSystem.getDevice().createCommandEncoder().clearColorTexture(main.getColorTexture(), TRANSPARENT);
+		RenderTarget current = Minecraft.getInstance().gameRenderer.mainRenderTarget();
+		if (current.getColorTexture() == null) return;
+		CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
+		if (current != this.levelTarget) {
+			this.baseImage = this.ensureTemp(this.baseImage, "FrameGen base image", current.width, current.height);
+			encoder.copyTextureToTexture(current.getColorTexture(), this.baseImage.texture(), 0, 0, 0, 0, 0, current.width, current.height);
+			this.baseCaptured = true;
+		}
+		encoder.clearColorTexture(current.getColorTexture(), TRANSPARENT);
+		this.guiTarget = current.getColorTexture();
 		this.guiSplit = true;
 	}
 
 	/**
-	 * Hook D (swapchain blit): build the overlay and record, restore the vanilla image in the main target.
+	 * Hook D (swapchain blit): build the overlay and record, restore the vanilla image in the presented texture.
 	 * Returns false if nothing could be captured (the frame is then simply not published).
 	 */
 	public boolean finishFrame(GpuTextureView mainColor) {
@@ -227,7 +277,6 @@ public final class FrameCapture {
 			r = this.record = this.exchange.newRecord();
 			r.simNanos = System.nanoTime();
 		}
-		RenderTarget main = Minecraft.getInstance().gameRenderer.mainRenderTarget();
 		int w = mainColor.getWidth(0);
 		int h = mainColor.getHeight(0);
 		r.width = w;
@@ -242,43 +291,41 @@ public final class FrameCapture {
 			return false;
 		}
 
-		// The main target is only resized at the start of GameRenderer.render, so the world slot captured at hook A
-		// always matches it here. (If the GUI was split, the layered path is also the only way to rebuild the image.)
-		// The texture handed to the swapchain blit is, by contract, the frame to show. Normally it is the main
-		// target; if another mod substitutes its own (a supersampling mod downscaling a larger main target, ...),
-		// present exactly that image and stop splitting layers, which assume the main target is the final image.
+		// The texture handed to the swapchain blit is, by contract, the frame to show: usually the main target, or a
+		// resolution-scaling mod's native-size output. If the GUI was split onto a texture that is *not* the one being
+		// presented, some other mod redirected the frame in a way we can't follow: present its image unchanged and
+		// stop splitting layers until it goes away.
 		GpuTexture presented = mainColor.texture();
-		boolean redirected = presented != main.getColorTexture();
-		if (redirected) {
+		boolean lost = this.guiSplit && presented != this.guiTarget;
+		if (lost) {
 			this.redirectActive = true;
 			this.framesWithoutRedirect = 0;
 			if (!this.redirectLogged) {
 				this.redirectLogged = true;
-				FrameGenMod.LOGGER.warn("FrameGen: another mod presents its own image instead of Minecraft's main framebuffer ({}x{} vs {}x{}). "
-					+ "Frames are shown unchanged and frame generation is paused while it does (supersampling / resolution scaling mods do this).",
-					w, h, main.width, main.height);
+				FrameGenMod.LOGGER.warn("FrameGen: another mod presents a different image ({}x{}) than the one the GUI was drawn into. "
+					+ "Frames are shown unchanged and frame generation is paused while it does.", w, h);
 			}
 		} else if (this.redirectActive && ++this.framesWithoutRedirect > 120) {
 			this.redirectActive = false;
 		}
-		boolean layered = this.worldCaptured && this.worldSlot != null && !redirected;
+		boolean layered = this.worldCaptured && this.worldSlot != null && !lost && this.worldSlot.width == w && this.worldSlot.height == h;
+		if (this.guiSplit && !lost && !layered) {
+			// GUI was split but the layers can't be used this frame (size changed mid-frame): still rebuild the image.
+			GpuTextureView vignette = this.vignetteIntercepted && this.vignetteView != null ? this.vignetteView : this.blankView();
+			this.rebuildPresented(encoder, mainColor, vignette, null, w, h);
+		}
 		if (layered) {
-			this.writeCompositeUbo(encoder);
 			GpuTextureView vignette = this.vignetteIntercepted && this.vignetteView != null ? this.vignetteView : this.blankView();
 			if (this.guiSplit) {
 				GpuTextureView hand = this.handSplit && this.handView != null ? this.handView : this.blankView();
+				this.writeCompositeUbo(encoder, 0, this.handSplit);
 				this.fullscreenPass(encoder, "FrameGen compose overlay", overlay.colorView, FrameGenPipelines.COMPOSE_OVERLAY, pass -> {
 					pass.setUniform("GuiSampler", mainColor, nearest());
 					pass.setUniform("HandSampler", hand, nearest());
 					pass.setUniform("VignetteSampler", vignette, linear());
-					pass.setUniform("FrameGenComposite", this.compositeUbo);
+					pass.setUniform("FrameGenComposite", this.compositeUbo.slice(0, 32));
 				});
-				this.fullscreenPass(encoder, "FrameGen rebuild frame", mainColor, FrameGenPipelines.FINAL, pass -> {
-					pass.setUniform("OverlaySampler", overlay.colorView, nearest());
-					pass.setUniform("WorldSampler", this.worldSlot.colorView, nearest());
-					pass.setUniform("VignetteSampler", vignette, linear());
-					pass.setUniform("FrameGenComposite", this.compositeUbo);
-				});
+				this.rebuildPresented(encoder, mainColor, vignette, overlay.colorView, w, h);
 			} else {
 				// HUD separation disabled: the whole frame minus the world is not separable, so the overlay is empty
 				// and the world layer is the full image (HUD gets warped with the world).
@@ -304,9 +351,10 @@ public final class FrameCapture {
 		this.worldSlot = null;
 		r.overlay = overlay;
 
-		// Crosshair & co: draw them for real into the main target, and hand them to the presenter.
+		// Crosshair & co: draw them for real into the presented image, and hand them to the presenter. GUI coordinates
+		// are in the window's GUI scale (resolution-scaling mods leave the window itself alone).
 		if (!this.pendingQuads.isEmpty()) {
-			int guiScale = Minecraft.getInstance().gameRenderer.gameRenderState().windowRenderState.guiScale;
+			int guiScale = Minecraft.getInstance().getWindow().getGuiScale();
 			this.replayQuads(encoder, mainColor, r, guiScale, w, h);
 			if (r.opaque) {
 				// The overlay is the full image: it must contain the crosshair too.
@@ -315,6 +363,37 @@ public final class FrameCapture {
 			}
 		}
 		return true;
+	}
+
+	/**
+	 * Turns the presented texture (currently holding only the GUI on transparent) back into the full frame.
+	 * With a resolution-scaling mod's base image: GUI over vignette x base (which already contains world + hand,
+	 * downscaled by that mod). Otherwise: overlay over vignette x captured world, exactly like vanilla.
+	 */
+	private void rebuildPresented(CommandEncoder encoder, GpuTextureView target, GpuTextureView vignette, @Nullable GpuTextureView overlay, int w, int h) {
+		if (this.baseCaptured && this.baseImage != null && this.baseImage.getWidth(0) == w && this.baseImage.getHeight(0) == h) {
+			this.guiCopy = this.ensureTemp(this.guiCopy, "FrameGen GUI copy", w, h);
+			encoder.copyTextureToTexture(target.texture(), this.guiCopy.texture(), 0, 0, 0, 0, 0, w, h);
+			this.writeCompositeUbo(encoder, 1, true);
+			GpuTextureView gui = this.guiCopy;
+			GpuTextureView base = this.baseImage;
+			// compose: gui + (1 - gui.a) * vignette * base, alpha 1 (the base is opaque)
+			this.fullscreenPass(encoder, "FrameGen rebuild frame (scaled)", target, FrameGenPipelines.COMPOSE_OVERLAY, pass -> {
+				pass.setUniform("GuiSampler", gui, nearest());
+				pass.setUniform("HandSampler", base, nearest());
+				pass.setUniform("VignetteSampler", vignette, linear());
+				pass.setUniform("FrameGenComposite", this.compositeUbo.slice(256, 32));
+			});
+		} else if (overlay != null && this.worldSlot != null && this.worldSlot.width == w && this.worldSlot.height == h) {
+			GpuTextureView world = this.worldSlot.colorView;
+			this.writeCompositeUbo(encoder, 1, this.handSplit);
+			this.fullscreenPass(encoder, "FrameGen rebuild frame", target, FrameGenPipelines.FINAL, pass -> {
+				pass.setUniform("OverlaySampler", overlay, nearest());
+				pass.setUniform("WorldSampler", world, nearest());
+				pass.setUniform("VignetteSampler", vignette, linear());
+				pass.setUniform("FrameGenComposite", this.compositeUbo.slice(256, 32));
+			});
+		}
 	}
 
 	/** After {@code CommandEncoder.submit()}: fence the frame's GPU work and hand it to the presenter. */
@@ -349,6 +428,10 @@ public final class FrameCapture {
 		this.vignetteView = null;
 		this.pendingQuads.clear();
 		this.levelProjectionSet = false;
+		this.levelTarget = null;
+		this.scaled = false;
+		this.guiTarget = null;
+		this.baseCaptured = false;
 	}
 
 	private void detectCut(FrameRecord r) {
@@ -412,16 +495,44 @@ public final class FrameCapture {
 		}
 	}
 
-	private void writeCompositeUbo(CommandEncoder encoder) {
+	/** Writes composite parameters (vignette, whether the hand layer is present) into UBO slot 0 or 1. */
+	private void writeCompositeUbo(CommandEncoder encoder, int slot, boolean handLayer) {
 		if (this.compositeUbo == null) {
-			this.compositeUbo = RenderSystem.getDevice().createBuffer(() -> "FrameGen composite UBO", GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_COPY_DST, 32);
+			this.compositeUbo = RenderSystem.getDevice().createBuffer(() -> "FrameGen composite UBO", GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_COPY_DST, 512);
 		}
 		try (MemoryStack stack = MemoryStack.stackPush()) {
 			ByteBuffer data = Std140Builder.onStack(stack, 32)
 				.putVec4(this.vignetteR, this.vignetteG, this.vignetteB, this.vignetteIntercepted ? 1.0f : 0.0f)
-				.putVec4(this.handSplit ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f)
+				.putVec4(handLayer ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f)
 				.get();
-			encoder.writeToBuffer(this.compositeUbo.slice(), data);
+			encoder.writeToBuffer(this.compositeUbo.slice(slot * 256L, 32), data);
+		}
+	}
+
+	/** A reusable RGBA8 render texture of the given size (recreated when the size changes). */
+	private GpuTextureView ensureTemp(@Nullable GpuTextureView current, String label, int w, int h) {
+		if (current != null && current.getWidth(0) == w && current.getHeight(0) == h) return current;
+		if (current != null) {
+			GpuTexture old = current.texture();
+			current.close();
+			old.close();
+		}
+		int usage = GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_COPY_SRC | GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_RENDER_ATTACHMENT;
+		GpuTexture texture = RenderSystem.getDevice().createTexture(label, usage, GpuFormat.RGBA8_UNORM, w, h, 1, 1);
+		return RenderSystem.getDevice().createTextureView(texture);
+	}
+
+	private void downsample(CommandEncoder encoder, GpuTextureView source, GpuTextureView target) {
+		this.fullscreenPass(encoder, "FrameGen downsample", target, FrameGenPipelines.DOWNSAMPLE, pass ->
+			pass.setUniform("InSampler", source, nearest()));
+	}
+
+	private void downsampleDepth(CommandEncoder encoder, GpuTextureView source, GpuTextureView targetDepth) {
+		RenderPassDescriptor descriptor = RenderPassDescriptor.builder(() -> "FrameGen downsample depth").withDepthAttachment(targetDepth).build();
+		try (RenderPass pass = encoder.createRenderPass(descriptor)) {
+			pass.setUniform("InSampler", source, nearest());
+			pass.setPipeline(RenderSystem.getCompiledPipeline(FrameGenPipelines.DOWNSAMPLE_DEPTH));
+			pass.draw(3, 1, 0, 0);
 		}
 	}
 
@@ -479,6 +590,16 @@ public final class FrameCapture {
 		if (this.blankTexture != null) this.blankTexture.close();
 		if (this.compositeUbo != null) this.compositeUbo.close();
 		if (this.quadUbo != null) this.quadUbo.close();
+		for (GpuTextureView temp : new GpuTextureView[]{this.hiresWorld, this.baseImage, this.guiCopy}) {
+			if (temp != null) {
+				GpuTexture texture = temp.texture();
+				temp.close();
+				texture.close();
+			}
+		}
+		this.hiresWorld = null;
+		this.baseImage = null;
+		this.guiCopy = null;
 		this.handView = null;
 		this.handTexture = null;
 		this.blankView = null;

@@ -29,6 +29,7 @@ public final class GpuSlot {
 	@Nullable GpuTexture color;
 	@Nullable GpuTexture depth;
 	@Nullable GpuTextureView colorView;
+	@Nullable GpuTextureView depthView;
 	int glColor;
 	int glDepth;
 	int width;
@@ -57,6 +58,7 @@ public final class GpuSlot {
 		this.glColor = ((GlTexture) this.color).glId();
 		if (this.kind == Kind.WORLD) {
 			this.depth = device.createTexture(base + " / depth", usage, GpuFormat.D32_FLOAT, width, height, 1, 1);
+			this.depthView = device.createTextureView(this.depth);
 			this.glDepth = ((GlTexture) this.depth).glId();
 		}
 		this.width = width;
@@ -73,6 +75,8 @@ public final class GpuSlot {
 
 	void destroyTextures() {
 		if (this.colorView != null) this.colorView.close();
+		if (this.depthView != null) this.depthView.close();
+		this.depthView = null;
 		if (this.color != null) this.color.close();
 		if (this.depth != null) this.depth.close();
 		this.colorView = null;

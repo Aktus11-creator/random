@@ -5,6 +5,8 @@ import com.mojang.renderpearl.api.pipeline.BindGroupLayout;
 import com.mojang.renderpearl.api.pipeline.BlendFactor;
 import com.mojang.renderpearl.api.pipeline.BlendFunction;
 import com.mojang.renderpearl.api.pipeline.ColorTargetState;
+import com.mojang.renderpearl.api.pipeline.CompareOp;
+import com.mojang.renderpearl.api.pipeline.DepthStencilState;
 import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import com.mojang.renderpearl.api.pipeline.UniformType;
@@ -74,6 +76,26 @@ public final class FrameGenPipelines {
 		.withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
 		.build();
 
+	/** Box-filter downscale (supersampled main target -> native resolution). */
+	public static final RenderPipeline DOWNSAMPLE = RenderPipeline.builder()
+		.withLocation(id("pipeline/downsample"))
+		.withVertexShader("core/screenquad")
+		.withFragmentShader(id("core/fg_downsample"))
+		.withBindGroupLayout(BindGroupLayouts.IN_SAMPLER)
+		.withColorTargetState(new ColorTargetState(Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
+		.withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+		.build();
+
+	/** Depth downscale into a depth-only render pass (same setup as vanilla's integrate_depth). */
+	public static final RenderPipeline DOWNSAMPLE_DEPTH = RenderPipeline.builder()
+		.withLocation(id("pipeline/downsample_depth"))
+		.withVertexShader("core/screenquad")
+		.withFragmentShader(id("core/fg_downsample_depth"))
+		.withBindGroupLayout(BindGroupLayouts.IN_SAMPLER)
+		.withDepthStencilState(new DepthStencilState(CompareOp.ALWAYS_PASS, true))
+		.withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+		.build();
+
 	private FrameGenPipelines() {
 	}
 
@@ -82,5 +104,7 @@ public final class FrameGenPipelines {
 		RenderPipelines.register(COMPOSE_OVERLAY);
 		RenderPipelines.register(FINAL);
 		RenderPipelines.register(INVERT_QUAD);
+		RenderPipelines.register(DOWNSAMPLE);
+		RenderPipelines.register(DOWNSAMPLE_DEPTH);
 	}
 }
