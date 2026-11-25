@@ -87,6 +87,7 @@ public final class FrameCapture {
 	private @Nullable GpuTextureView hiresWorld;
 	private @Nullable GpuTextureView baseImage;
 	private @Nullable GpuTextureView guiCopy;
+	private @Nullable GpuTextureView handRaw;
 	private int framesWithoutRedirect;
 	private boolean redirectLogged;
 	private boolean levelProjectionSet;
@@ -216,18 +217,26 @@ public final class FrameCapture {
 	public void afterLevel() {
 		if (!this.handSplit || this.worldSlot == null || this.levelTarget == null) return;
 		RenderTarget main = this.levelTarget;
+		GpuTextureView mainColor = main.getColorTextureView();
+		GpuTextureView mainDepth = main.getDepthTextureView();
+		if (mainColor == null || mainDepth == null) return;
 		this.ensureHandTexture(this.worldSlot.width, this.worldSlot.height);
 		CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
-		if (!this.scaled) {
-			encoder.copyTextureToTexture(main.getColorTexture(), this.handTexture, 0, 0, 0, 0, 0, main.width, main.height);
-		} else {
-			// Premultiplied colour box-filters correctly.
-			this.downsample(encoder, main.getColorTextureView(), this.handView);
-		}
+		// Hand layer for the presenter (native size, coverage from alpha or depth, see fg_hand_capture).
+		this.fullscreenPass(encoder, "FrameGen capture hand", this.handView, FrameGenPipelines.HAND_CAPTURE, pass -> {
+			pass.setUniform("InSampler", mainColor, nearest());
+			pass.setUniform("DepthSampler", mainDepth, nearest());
+		});
 		// Put the world back underneath the hand so everything after this point sees the vanilla image.
+		this.handRaw = this.ensureTemp(this.handRaw, "FrameGen hand (full size)", main.width, main.height);
+		encoder.copyTextureToTexture(main.getColorTexture(), this.handRaw.texture(), 0, 0, 0, 0, 0, main.width, main.height);
 		GpuTextureView world = this.scaled ? this.hiresWorld : this.worldSlot.colorView;
-		this.fullscreenPass(encoder, "FrameGen restore world", main.getColorTextureView(), FrameGenPipelines.UNDER, pass ->
-			pass.setUniform("InSampler", world, nearest()));
+		GpuTextureView hand = this.handRaw;
+		this.fullscreenPass(encoder, "FrameGen restore world", mainColor, FrameGenPipelines.HAND_RESTORE, pass -> {
+			pass.setUniform("HandSampler", hand, nearest());
+			pass.setUniform("WorldSampler", world, nearest());
+			pass.setUniform("DepthSampler", mainDepth, nearest());
+		});
 	}
 
 	/** Hook B2: after entity outlines and post effects were applied to the main target. */
@@ -590,7 +599,7 @@ public final class FrameCapture {
 		if (this.blankTexture != null) this.blankTexture.close();
 		if (this.compositeUbo != null) this.compositeUbo.close();
 		if (this.quadUbo != null) this.quadUbo.close();
-		for (GpuTextureView temp : new GpuTextureView[]{this.hiresWorld, this.baseImage, this.guiCopy}) {
+		for (GpuTextureView temp : new GpuTextureView[]{this.hiresWorld, this.baseImage, this.guiCopy, this.handRaw}) {
 			if (temp != null) {
 				GpuTexture texture = temp.texture();
 				temp.close();
@@ -600,6 +609,7 @@ public final class FrameCapture {
 		this.hiresWorld = null;
 		this.baseImage = null;
 		this.guiCopy = null;
+		this.handRaw = null;
 		this.handView = null;
 		this.handTexture = null;
 		this.blankView = null;

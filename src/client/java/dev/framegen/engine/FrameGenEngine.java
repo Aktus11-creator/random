@@ -180,6 +180,30 @@ public final class FrameGenEngine {
 	}
 
 	/**
+	 * Frame rate a dynamic resolution scaler (Supersample) should aim for. While frame generation is on in a world,
+	 * that's the output rate divided by the multiplier (at least 2), so the scaler spends only half the frame budget
+	 * and FrameGen fills in the rest. Otherwise the scaler's own target is kept.
+	 */
+	public static double adjustResolutionScalerTarget(double target) {
+		Presenter p = presenter;
+		FrameGenConfig config = FrameGenConfig.get();
+		var mc = net.minecraft.client.Minecraft.getInstance();
+		if (p == null || !isPresenterRunning() || !config.enabled || mc.level == null || mc.gui.screen() != null) {
+			return target;
+		}
+		double output = config.targetOutputFps > 0 ? config.targetOutputFps : p.displayHz();
+		double base = output / Math.max(2, config.multiplier);
+		if (!compatLogged) {
+			compatLogged = true;
+			FrameGenMod.LOGGER.info("FrameGen: asking the dynamic resolution scaler to target {} fps (output {} fps)",
+				Math.round(Math.min(target, base)), Math.round(output));
+		}
+		return Math.max(30.0, Math.min(target, base));
+	}
+
+	private static boolean compatLogged;
+
+	/**
 	 * The game's frame rate cap while generating: leave the GPU room for the presenter and give the interpolator
 	 * evenly spaced input. Returns the vanilla limit unchanged when frame generation isn't running.
 	 */

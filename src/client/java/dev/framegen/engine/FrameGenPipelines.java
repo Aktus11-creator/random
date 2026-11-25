@@ -96,6 +96,36 @@ public final class FrameGenPipelines {
 		.withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
 		.build();
 
+	private static final BindGroupLayout HAND_CAPTURE_LAYOUT = BindGroupLayout.builder()
+		.withUniform("InSampler", UniformType.COMBINED_IMAGE_SAMPLER)
+		.withUniform("DepthSampler", UniformType.COMBINED_IMAGE_SAMPLER)
+		.build();
+	private static final BindGroupLayout HAND_RESTORE_LAYOUT = BindGroupLayout.builder()
+		.withUniform("HandSampler", UniformType.COMBINED_IMAGE_SAMPLER)
+		.withUniform("WorldSampler", UniformType.COMBINED_IMAGE_SAMPLER)
+		.withUniform("DepthSampler", UniformType.COMBINED_IMAGE_SAMPLER)
+		.build();
+
+	/** Hand layer extraction: colour + coverage from alpha or depth, box-filtered to the target size. */
+	public static final RenderPipeline HAND_CAPTURE = RenderPipeline.builder()
+		.withLocation(id("pipeline/hand_capture"))
+		.withVertexShader("core/screenquad")
+		.withFragmentShader(id("core/fg_hand_capture"))
+		.withBindGroupLayout(HAND_CAPTURE_LAYOUT)
+		.withColorTargetState(new ColorTargetState(Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
+		.withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+		.build();
+
+	/** Puts the world back under the hand in the main target, using the same coverage rule. */
+	public static final RenderPipeline HAND_RESTORE = RenderPipeline.builder()
+		.withLocation(id("pipeline/hand_restore"))
+		.withVertexShader("core/screenquad")
+		.withFragmentShader(id("core/fg_hand_restore"))
+		.withBindGroupLayout(HAND_RESTORE_LAYOUT)
+		.withColorTargetState(new ColorTargetState(Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
+		.withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+		.build();
+
 	private FrameGenPipelines() {
 	}
 
@@ -106,5 +136,7 @@ public final class FrameGenPipelines {
 		RenderPipelines.register(INVERT_QUAD);
 		RenderPipelines.register(DOWNSAMPLE);
 		RenderPipelines.register(DOWNSAMPLE_DEPTH);
+		RenderPipelines.register(HAND_CAPTURE);
+		RenderPipelines.register(HAND_RESTORE);
 	}
 }

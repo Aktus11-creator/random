@@ -2,6 +2,7 @@
 	"required": true,
 	"minVersion": "0.8",
 	"package": "dev.framegen.mixin",
+	"plugin": "dev.framegen.mixin.FrameGenMixinPlugin",
 	"compatibilityLevel": "JAVA_25",
 	"client": [
 		"GlBackendMixin",
@@ -9,7 +10,8 @@
 		"GameRendererMixin",
 		"GameRendererAccessor",
 		"LevelRendererAccessor",
-		"GuiGraphicsExtractorMixin"
+		"GuiGraphicsExtractorMixin",
+		"compat.SupersampleTargetFpsMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

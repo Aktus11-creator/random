@@ -170,6 +170,17 @@ disabled; its rendering path was checked by code review, not by running it.
 
 ## Changelog
 
+**1.4.0**
+- **First-person hand no longer disappears.** The hand layer used to be detected from alpha only, and with some
+  mod combinations (entity model/texture mods, 3D skin layers, hand-size mods) parts of the arm are drawn without
+  writing alpha, so the hand got dropped. Coverage now also comes from the hand's depth, which Minecraft clears
+  right before drawing the hand, so it's reliable whatever writes or doesn't write alpha.
+- **Works together with Supersample's dynamic mode.** That mode raised the resolution until the game reached
+  the display's refresh rate, leaving FrameGen nothing to generate, so the camera wasn't boosted. While FrameGen
+  is on, Supersample is now asked to target half the output rate, and FrameGen doubles the camera back to the
+  full refresh rate. This compat hook is only applied when Supersample is installed.
+- New, simpler flat icon.
+
 **1.3.1**
 - **Extrapolate is now the default mode**, and existing configs are switched over. It adds no input delay on top of
   the game's own: the presented camera is exactly as old as a real frame when it reaches the screen. Interpolate
