@@ -204,6 +204,16 @@ public final class FrameGenEngine {
 	private static boolean compatLogged;
 
 	/**
+	 * Clip-space scale for the culling frustum so it includes the overscan margin (1 = unchanged). Slightly wider than
+	 * the exact margin: the frustum is built before the frame's final target size is known.
+	 */
+	public static float overscanCullingScale() {
+		FrameGenConfig config = FrameGenConfig.get();
+		if (!config.enabled || config.overscan <= 0 || !config.sharpHud || !isPresenterRunning()) return 1.0f;
+		return 1.0f / (1.0f + 2.0f * config.overscan / 100.0f + 0.02f);
+	}
+
+	/**
 	 * The game's frame rate cap while generating: leave the GPU room for the presenter and give the interpolator
 	 * evenly spaced input. Returns the vanilla limit unchanged when frame generation isn't running.
 	 */

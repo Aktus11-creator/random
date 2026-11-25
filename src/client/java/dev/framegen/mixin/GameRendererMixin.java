@@ -1,12 +1,16 @@
 package dev.framegen.mixin;
 
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import dev.framegen.engine.FrameCapture;
 import dev.framegen.engine.FrameGenEngine;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.renderer.GameRenderer;
+import net.minecraft.client.renderer.GlobalSettingsUniform;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.client.renderer.state.level.PlayerRenderState;
 import net.minecraft.client.renderer.state.OptionsRenderState;
+import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -21,6 +25,21 @@ abstract class GameRendererMixin {
 	private void framegen$beginExtract(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
 		FrameCapture capture = FrameGenEngine.capture();
 		if (capture != null) capture.beginExtract();
+	}
+
+	/** Remember the frame's global uniforms so overscan can re-issue them with its larger screen size. */
+	@WrapOperation(method = "render", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/GlobalSettingsUniform;update(IIDJFILnet/minecraft/world/phys/Vec3;Z)V"))
+	private void framegen$recordGlobalSettings(GlobalSettingsUniform uniform, int width, int height, double glintAlpha, long gameTime, float partialTicks,
+		int menuBlurRadius, Vec3 cameraPos, boolean useRgss, Operation<Void> original) {
+		original.call(uniform, width, height, glintAlpha, gameTime, partialTicks, menuBlurRadius, cameraPos, useRgss);
+		FrameCapture capture = FrameGenEngine.capture();
+		if (capture != null) capture.onGlobalSettings(uniform, glintAlpha, gameTime, partialTicks, menuBlurRadius, cameraPos, useRgss);
+	}
+
+	@Inject(method = "renderLevel", at = @At("HEAD"))
+	private void framegen$beginLevel(CallbackInfo ci) {
+		FrameCapture capture = FrameGenEngine.capture();
+		if (capture != null) capture.beginOverscan((GameRenderer) (Object) this);
 	}
 
 	@ModifyArg(
@@ -43,7 +62,10 @@ abstract class GameRendererMixin {
 	@Inject(method = "renderLevel", at = @At("TAIL"))
 	private void framegen$afterLevel(CallbackInfo ci) {
 		FrameCapture capture = FrameGenEngine.capture();
-		if (capture != null) capture.afterLevel();
+		if (capture != null) {
+			capture.endOverscan(); // normally already done before the hand; never leave the swapped target behind
+			capture.afterLevel();
+		}
 	}
 
 	@Inject(method = "render", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/GameRenderer;applyPostEffects()V", shift = At.Shift.AFTER))

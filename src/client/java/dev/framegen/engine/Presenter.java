@@ -527,6 +527,7 @@ public final class Presenter implements Runnable {
 	private void drawCompose(FrameRecord r) {
 		GlProgram p = this.compose;
 		p.use();
+		p.setVec4("uWorldRect", 0.5f - 0.5f * r.overscanX, 0.5f - 0.5f * r.overscanY, 0.5f + 0.5f * r.overscanX, 0.5f + 0.5f * r.overscanY);
 		bindTexture(2, r.world.glColor, this.linearSampler);
 		bindTexture(4, r.overlay.glColor, this.linearSampler);
 		if (r.vignette && r.vignetteTexture != 0) {
@@ -782,7 +783,9 @@ public final class Presenter implements Runnable {
 		FrameGenConfig config = FrameGenConfig.get();
 		GlProgram p = this.warp;
 		p.use();
-		this.target.set(b);
+		// Output framed like B's world layer (margin included) so it can be compared with it pixel by pixel. Only the
+		// part the screen shows is scored below: the margin is there to be used, not to be reconstructed.
+		this.target.set(b).showAsRendered();
 		this.poseA.set(a);
 		this.target.reprojection(this.poseA, this.fwd, this.fwdRot, this.inv, this.invRot);
 		p.setMat4("uFwdB", this.fwd);
@@ -831,10 +834,15 @@ public final class Presenter implements Runnable {
 					d, String.format("%.3f", dist), String.format("%.3f", a.debugHitDistance), a.zZeroToOne);
 				GL33C.glFramebufferTexture2D(GL33C.GL_FRAMEBUFFER, GL33C.GL_COLOR_ATTACHMENT0, GL33C.GL_TEXTURE_2D, this.testTexture, 0);
 			}
-			double warpedPsnr = psnr(warped, real, w * h, null);
-			double reusePsnr = psnr(old, real, w * h, null);
+			int x0 = Math.round(w * 0.5f * (1.0f - b.overscanX));
+			int y0 = Math.round(h * 0.5f * (1.0f - b.overscanY));
+			int x1 = w - x0;
+			int y1 = h - y0;
+			int visible = (x1 - x0) * (y1 - y0);
+			double warpedPsnr = psnr(warped, real, w, x0, y0, x1, y1, null);
+			double reusePsnr = psnr(old, real, w, x0, y0, x1, y1, null);
 			int[] covered = new int[1];
-			double coveredPsnr = psnr(warped, real, w * h, covered);
+			double coveredPsnr = psnr(warped, real, w, x0, y0, x1, y1, covered);
 			double dist = Pose.distance(this.poseA, this.target);
 			double angle = Math.toDegrees(Pose.angleBetween(this.poseA, this.target));
 			// Micro-benchmark: the full two-frame interpolation pass, isolated with glFinish.
@@ -857,7 +865,7 @@ public final class Presenter implements Runnable {
 			}
 			FrameGenMod.LOGGER.info("[self-test] camera moved {} blocks / {} deg: reprojection PSNR {} dB vs. frame reuse {} dB; {}% of pixels reconstructed confidently at {} dB",
 				String.format("%.2f", dist), String.format("%.1f", angle), String.format("%.1f", warpedPsnr), String.format("%.1f", reusePsnr),
-				String.format("%.1f", 100.0 * covered[0] / (w * h)), String.format("%.1f", coveredPsnr));
+				String.format("%.1f", 100.0 * covered[0] / visible), String.format("%.1f", coveredPsnr));
 		} finally {
 			org.lwjgl.system.MemoryUtil.memFree(warped);
 			org.lwjgl.system.MemoryUtil.memFree(real);
@@ -868,16 +876,22 @@ public final class Presenter implements Runnable {
 		}
 	}
 
-	/** PSNR over all pixels, or (if {@code coveredOut} is given) only those whose alpha in {@code x} marks them confident. */
-	private static double psnr(java.nio.ByteBuffer x, java.nio.ByteBuffer y, int pixels, int @Nullable [] coveredOut) {
+	/**
+	 * PSNR over the pixels in [x0, x1) x [y0, y1) of two images {@code width} pixels wide, or (if {@code coveredOut} is
+	 * given) only those whose alpha in {@code x} marks them confident.
+	 */
+	private static double psnr(java.nio.ByteBuffer x, java.nio.ByteBuffer y, int width, int x0, int y0, int x1, int y1, int @Nullable [] coveredOut) {
 		double sum = 0.0;
 		int counted = 0;
-		for (int i = 0; i < pixels; i++) {
-			if (coveredOut != null && (x.get(i * 4 + 3) & 0xFF) < 128) continue;
-			counted++;
-			for (int c = 0; c < 3; c++) {
-				int d = (x.get(i * 4 + c) & 0xFF) - (y.get(i * 4 + c) & 0xFF);
-				sum += d * d;
+		for (int py = y0; py < y1; py++) {
+			for (int px = x0; px < x1; px++) {
+				int i = py * width + px;
+				if (coveredOut != null && (x.get(i * 4 + 3) & 0xFF) < 128) continue;
+				counted++;
+				for (int c = 0; c < 3; c++) {
+					int d = (x.get(i * 4 + c) & 0xFF) - (y.get(i * 4 + c) & 0xFF);
+					sum += d * d;
+				}
 			}
 		}
 		if (coveredOut != null) coveredOut[0] = counted;

@@ -27,4 +27,12 @@ for c in cmds:
     elif p[0]=="up": keydown(p[1],False)
     elif p[0]=="sleep": time.sleep(float(p[1]))
     elif p[0]=="type":
-        for ch in p[1]: key(ch)
+        # Characters that need shift on a US layout; ' ' is typed as space.
+        shifted={'~':'grave','{':'bracketleft','}':'bracketright','@':'2','^':'6','!':'1','"':'apostrophe','_':'minus','+':'equal','<':'comma','>':'period','?':'slash',':':'semicolon','|':'backslash','(':'9',')':'0','*':'8','#':'3','$':'4','%':'5','&':'7'}
+        names={' ':'space','/':'slash','.':'period',',':'comma','-':'minus','=':'equal','[':'bracketleft',']':'bracketright',';':'semicolon',"'":'apostrophe','`':'grave','\\':'backslash'}
+        text=c[len("type:"):]
+        for ch in text:
+            if ch in shifted or ch.isupper():
+                keydown("Shift_L",True); key(shifted.get(ch, ch.lower())); keydown("Shift_L",False)
+            else:
+                key(names.get(ch, ch))

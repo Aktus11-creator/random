@@ -126,6 +126,31 @@ public final class FrameGenPipelines {
 		.withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
 		.build();
 
+	private static final BindGroupLayout CROP_LAYOUT = BindGroupLayout.builder()
+		.withUniform("InSampler", UniformType.COMBINED_IMAGE_SAMPLER)
+		.withUniform("FrameGenCrop", UniformType.UNIFORM_BUFFER)
+		.build();
+
+	/** 1:1 copy of the centre of the overscanned world into the (smaller) main target. */
+	public static final RenderPipeline CROP = RenderPipeline.builder()
+		.withLocation(id("pipeline/crop"))
+		.withVertexShader("core/screenquad")
+		.withFragmentShader(id("core/fg_crop"))
+		.withBindGroupLayout(CROP_LAYOUT)
+		.withColorTargetState(new ColorTargetState(Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
+		.withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+		.build();
+
+	/** Same for depth (depth-only pass, like {@link #DOWNSAMPLE_DEPTH}). */
+	public static final RenderPipeline CROP_DEPTH = RenderPipeline.builder()
+		.withLocation(id("pipeline/crop_depth"))
+		.withVertexShader("core/screenquad")
+		.withFragmentShader(id("core/fg_crop_depth"))
+		.withBindGroupLayout(CROP_LAYOUT)
+		.withDepthStencilState(new DepthStencilState(CompareOp.ALWAYS_PASS, true))
+		.withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+		.build();
+
 	private FrameGenPipelines() {
 	}
 
@@ -138,5 +163,7 @@ public final class FrameGenPipelines {
 		RenderPipelines.register(DOWNSAMPLE_DEPTH);
 		RenderPipelines.register(HAND_CAPTURE);
 		RenderPipelines.register(HAND_RESTORE);
+		RenderPipelines.register(CROP);
+		RenderPipelines.register(CROP_DEPTH);
 	}
 }

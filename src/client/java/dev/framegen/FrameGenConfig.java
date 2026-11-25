@@ -56,6 +56,12 @@ public final class FrameGenConfig {
 	public volatile boolean sharpHud = true;
 	/** Maximum prediction, in real-frame intervals, for extrapolation and late frames. */
 	public volatile float maxExtrapolation = 1.0f;
+	/**
+	 * Extra field of view rendered around the screen, in percent of the width/height per side (0 = off). Generated
+	 * frames take newly revealed screen edges from this margin instead of stretching the last edge pixels. Costs
+	 * roughly (1 + 2 * overscan / 100)^2 times the world's pixel count.
+	 */
+	public volatile int overscan = 8;
 	/** Wait for the GPU after every present. Lowers latency and improves pacing on most drivers. */
 	public volatile boolean lowLatencyPresent = true;
 	/** Show the frame generation statistics line in the HUD. */
@@ -117,6 +123,7 @@ public final class FrameGenConfig {
 		if (this.quality == null) this.quality = Quality.MEDIUM;
 		if (this.multiplier < 0 || this.multiplier > 8) this.multiplier = 1;
 		if (this.targetOutputFps < 0 || this.targetOutputFps > 1000) this.targetOutputFps = 0;
+		if (this.overscan < 0 || this.overscan > 25) this.overscan = 8;
 		if (!(this.maxExtrapolation >= 0.0f) || this.maxExtrapolation > 3.0f) this.maxExtrapolation = 1.0f;
 	}
 

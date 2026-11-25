@@ -28,6 +28,9 @@ presenter (own thread)    ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ �
     especially at low frame rates, and adds about one real frame of latency.
   - *Extrapolate*: predicts forward from the newest frame. It adds no latency but is less smooth at low frame
     rates and can briefly overshoot when you stop turning.
+- **No stretched screen edges.** The world is rendered with a small margin around the screen (*overscan*), so
+  when you turn, the edge that comes into view is real scenery instead of stretched edge pixels. Real frames are
+  cropped back to the normal view.
 - **Sharp HUD and hand.** The world, the first-person hand and the HUD are captured as separate layers. Only the
   world is reprojected, so the hotbar, chat, crosshair and hand never wobble or smear. The vignette (multiply blend)
   and the crosshair (invert blend) are replayed exactly over the generated image.
@@ -79,6 +82,7 @@ Rebind them under *Options → Controls → Key Binds → FrameGen*.
 | Quality | Solver iterations per pixel and disocclusion background search. Low / **Medium** (default) / High / Ultra. The solver stops early once a pixel has converged, so higher tiers mostly cost more around edges. |
 | Real FPS Limit | **Display rate** (default) means the game never renders more real frames than your display shows. FrameGen only fills in when the game drops below that. *1/2 display* and lower trade real frames for GPU headroom; use them only if the game stutters. *Game limit* uses your Max Framerate. |
 | Output FPS | Presentation rate when V-Sync is off ("Display" = refresh rate). |
+| Overscan | Extra field of view rendered around the screen, per side: Off / 4% / **8%** (default) / … / 24%. Generated frames use it for screen edges coming into view while you turn. Real frames look the same. Costs GPU time: 8% renders about 35% more world pixels. Skipped automatically while post effects or glowing entities are on screen. |
 | Sharp HUD and Hand | Keeps HUD and hand out of the reprojection. Disable only if another mod's HUD looks wrong. |
 | Max Prediction | Extrapolate mode only: how far past the newest real frame the camera may be predicted, in real frames. It has no effect with Interpolate. |
 | Low Latency Present | Waits for each present to complete. This gives lower latency and steadier pacing on most drivers. |
@@ -93,8 +97,11 @@ The settings are stored in `config/framegen.json`.
  render thread (Minecraft's GL context)                    presenter thread (shared GL context, owns the window)
  ─────────────────────────────────────                    ─────────────────────────────────────────────────────
  extract  → sample camera, timestamp
- level    → [A] copy world color + depth into a frame slot,
-               clear color to transparent
+ level    → [O] rendered into a larger target with a wider
+               projection (overscan margin)
+          → [A] copy world color + depth into a frame slot,
+               crop the normal view back into the main
+               target, clear color to transparent
  hand     → renders onto transparent target
           → [B] copy hand layer, put world back underneath
  post fx  → [B2] if post effects/outlines drew over the
@@ -121,6 +128,10 @@ The settings are stored in `config/framegen.json`.
 - Reprojection uses the full homogeneous transform
   `M = P_target · R_target · T(cam_source − cam_target) · (P_source · R_source)⁻¹`, built in double precision. Sky
   pixels (cleared reversed-Z depth) use the rotation-only variant, so they behave as if infinitely far away.
+- Overscan multiplies the level's projection by `diag(w/W, h/H, 1, 1)` in clip space and renders into a target
+  that is `W × H` instead of `w × h`. The centre `w × h` pixels are then exactly the normal image (pixel centres
+  line up), and the culling frustum is widened to match. The presenter reads source frames with this wider
+  projection and produces output with the normal one.
 - Window-space depth is affine across planes, so depth is interpolated bilinearly within surfaces (exact on
   Minecraft's flat faces) and by nearest texel across discontinuities.
 
@@ -169,6 +180,16 @@ Nvidium only enables itself on NVIDIA GPUs with mesh shaders. The test machine h
 disabled; its rendering path was checked by code review, not by running it.
 
 ## Changelog
+
+**1.5.0**
+- **No more stretched screen edges when you turn fast.** FrameGen now renders a little more of the world than
+  fits on screen (new *Overscan* setting, 8% per side by default). Generated frames take the edge that comes
+  into view from that margin instead of stretching the last column of pixels. Real frames are cropped back, so
+  they look the same as before. In the test, a 5° turn between real frames now reconstructs 98% of the screen
+  (was 89–90%).
+- Works with supersampling mods: the margin scales with their render resolution, and they still get their
+  normal image.
+- Costs GPU time (8% ≈ 35% more world pixels). If your FPS drops too much, lower it to 4% or turn it off.
 
 **1.4.2**
 - **Fixes the invisible first-person hand** (and other silently missing layers) on some setups. Minecraft 26.3's
@@ -237,8 +258,9 @@ disabled; its rendering path was checked by code review, not by running it.
 - Entities, particles and animated textures update at the real frame rate. Without motion vectors only the camera
   is reconstructed between real frames. In interpolation mode, conflicting pixels snap to the nearer real frame
   instead of ghosting.
-- The edges of the screen that just came into view have no source data and are filled by edge stretching. This is
-  hard to notice at normal frame rates.
+- Screen edges that come into view are taken from the overscan margin. A turn larger than the margin between two
+  real frames (or overscan off) still shows some edge stretching. Overscan sits out frames with post effects
+  (e.g. spectating a creeper) or glowing entities on screen.
 - Shader packs (Iris) and other mods that replace the window surface are untested. Sodium, Nvidium and
   supersampling mods that swap the main render target are supported (see above and the changelog).
 

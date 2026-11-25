@@ -21,8 +21,15 @@ public final class FrameRecord {
 	public @Nullable GpuSlot world;
 	public @Nullable GpuSlot overlay;
 
-	/** Projection actually used for the level, including view bobbing and nausea distortion. */
+	/** Projection actually used for the level, including view bobbing, nausea distortion and the overscan margin. */
 	public final Matrix4f projection = new Matrix4f();
+	/**
+	 * Overscan: the screen shows only the centre of the world layer, {@code [-overscanX, overscanX] x [-overscanY,
+	 * overscanY]} in its NDC; the projection the player sees is {@code diag(1/overscanX, 1/overscanY, 1, 1) * projection}.
+	 * 1 = no margin.
+	 */
+	public float overscanX = 1.0f;
+	public float overscanY = 1.0f;
 	/** Camera rotation (model-view without translation); level geometry is camera-relative. */
 	public final Matrix4f viewRotation = new Matrix4f();
 	public double camX;

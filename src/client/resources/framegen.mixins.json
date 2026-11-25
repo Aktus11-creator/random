@@ -9,6 +9,8 @@
 		"MinecraftMixin",
 		"GameRendererMixin",
 		"GameRendererAccessor",
+		"CameraMixin",
+		"SkyRendererMixin",
 		"LevelRendererAccessor",
 		"GuiGraphicsExtractorMixin",
 		"GlCommandEncoderMixin",

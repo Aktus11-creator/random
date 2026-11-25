@@ -5,9 +5,16 @@ import org.joml.Matrix4d;
 import org.joml.Matrix4f;
 import org.joml.Quaterniond;
 
-/** A camera pose: projection, view rotation and world position. Double precision so far-from-origin worlds stay exact. */
+/**
+ * A camera pose: projections, view rotation and world position. Double precision so far-from-origin worlds stay exact.
+ *
+ * <p>There are two projections because of overscan: {@link #projection} is what the frame was rendered with (wider
+ * than the screen), {@link #display} is what the player sees. Source frames are read with the first, generated frames
+ * are produced with the second.
+ */
 final class Pose {
 	final Matrix4d projection = new Matrix4d();
+	final Matrix4d display = new Matrix4d();
 	final Quaterniond rotation = new Quaterniond();
 	double x;
 	double y;
@@ -20,6 +27,7 @@ final class Pose {
 
 	Pose set(FrameRecord record) {
 		this.projection.set(record.projection);
+		this.display.set(this.projection).scaleLocal(1.0 / record.overscanX, 1.0 / record.overscanY, 1.0);
 		new Matrix4d(record.viewRotation).getNormalizedRotation(this.rotation);
 		this.x = record.camX;
 		this.y = record.camY;
@@ -27,8 +35,15 @@ final class Pose {
 		return this;
 	}
 
+	/** Produce output framed like the source image itself, margin included (self-test). */
+	Pose showAsRendered() {
+		this.display.set(this.projection);
+		return this;
+	}
+
 	Pose set(Pose other) {
 		this.projection.set(other.projection);
+		this.display.set(other.display);
 		this.rotation.set(other.rotation);
 		this.x = other.x;
 		this.y = other.y;
@@ -44,6 +59,7 @@ final class Pose {
 	Pose blend(Pose a, Pose b, double t) {
 		double tp = Math.max(0.0, Math.min(1.0, t));
 		a.projection.lerp(b.projection, tp, this.projection);
+		a.display.lerp(b.display, tp, this.display);
 		this.x = a.x + (b.x - a.x) * t;
 		this.y = a.y + (b.y - a.y) * t;
 		this.z = a.z + (b.z - a.z) * t;
@@ -84,8 +100,8 @@ final class Pose {
 	void reprojection(Pose source, Matrix4f fwd, Matrix4f fwdRot, Matrix4f inv, Matrix4f invRot) {
 		// inverse(P_s * R_s): source NDC -> camera-relative world direction/point (homogeneous).
 		Matrix4d sourceInv = this.tmpA.set(source.projection).rotate(source.rotation).invert();
-		// P_t * R_t
-		Matrix4d targetVp = this.tmpB.set(this.projection).rotate(this.rotation);
+		// P_t * R_t, framed like the screen
+		Matrix4d targetVp = this.tmpB.set(this.display).rotate(this.rotation);
 
 		Matrix4d m = new Matrix4d(targetVp).mul(sourceInv);
 		fwdRot.set(m);

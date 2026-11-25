@@ -47,6 +47,7 @@ public final class FrameGenScreen extends OptionsSubScreen {
 				v -> Component.translatable("framegen.quality." + v.name().toLowerCase(Locale.ROOT))),
 			multiplierOption(c),
 			outputFpsOption(c),
+			overscanOption(c),
 			bool("framegen.option.sharp_hud", c.sharpHud, v -> c.sharpHud = v),
 			extrapolationOption(c),
 			bool("framegen.option.low_latency", c.lowLatencyPresent, v -> c.lowLatencyPresent = v),
@@ -114,6 +115,16 @@ public final class FrameGenScreen extends OptionsSubScreen {
 			value == 0 ? Component.translatable("framegen.output_fps.display") : Component.literal(Integer.toString(30 + (value - 1) * 5))),
 			new OptionInstance.IntRange(0, 67), initial, v -> {
 				c.targetOutputFps = v == 0 ? 0 : 30 + (v - 1) * 5;
+				c.save();
+			});
+	}
+
+	/** Slider positions 0..6 = 0, 4, 8 ... 24 percent per side. */
+	private static OptionInstance<Integer> overscanOption(FrameGenConfig c) {
+		String key = "framegen.option.overscan";
+		return new OptionInstance<>(key, tooltip(key), (caption, value) -> Options.genericValueLabel(caption, FrameGenMod.overscanName(value * 4)),
+			new OptionInstance.IntRange(0, 6), Math.round(c.overscan / 4.0f), v -> {
+				c.overscan = v * 4;
 				c.save();
 			});
 	}

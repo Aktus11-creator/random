@@ -2,6 +2,7 @@ package dev.framegen.engine;
 
 import com.mojang.blaze3d.buffers.Std140Builder;
 import com.mojang.blaze3d.pipeline.RenderTarget;
+import com.mojang.blaze3d.pipeline.TextureTarget;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.renderpearl.api.buffers.GpuBuffer;
@@ -16,15 +17,20 @@ import com.mojang.renderpearl.api.textures.GpuTextureView;
 import com.mojang.renderpearl.backend.opengl.GlTexture;
 import dev.framegen.FrameGenConfig;
 import dev.framegen.FrameGenMod;
+import dev.framegen.mixin.GameRendererAccessor;
 import dev.framegen.mixin.LevelRendererAccessor;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.GameRenderer;
+import net.minecraft.client.renderer.GlobalSettingsUniform;
 import net.minecraft.client.renderer.RenderPipelines;
+import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.util.ARGB;
+import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix3x2f;
 import org.joml.Matrix4f;
 import org.joml.Vector2f;
@@ -37,7 +43,10 @@ import org.lwjgl.system.MemoryStack;
  * Render-thread half of the engine. Hooks into {@code GameRenderer} to split each real frame into layers:
  *
  * <pre>
- *   A  after the level, before the hand:  world color + depth  -> world slot;  clear color to transparent
+ *   O  before the level (overscan):       swap in a larger main target, widen the projection by the same ratio
+ *   A  after the level, before the hand:  world color + depth  -> world slot (with the overscan margin);
+ *                                         overscan: crop the exact vanilla view back into the real main target;
+ *                                         clear color to transparent
  *   (hand and screen effects render onto the transparent target)
  *   B  after the hand:                    hand layer -> handTexture;  put the world back underneath
  *   B2 after post effects / outlines:     if those touched the image, bake it into the world layer
@@ -94,6 +103,36 @@ public final class FrameCapture {
 	private boolean redirectLogged;
 	private boolean levelProjectionSet;
 
+	// Overscan (see beginOverscan) -------------------------------------------------------------------------------
+	private boolean overscanActive;
+	/** This frame's world layer includes an overscan margin. */
+	private boolean overscanUsed;
+	private @Nullable RenderTarget overscanTarget;
+	private @Nullable RenderTarget overscanSavedMain;
+	private final Matrix4f overscanSavedProjection = new Matrix4f();
+	private @Nullable CameraRenderState overscanCamera;
+	/** Margin in render-target pixels (crop offset) and in native pixels (world slot), per side. */
+	private int overscanX;
+	private int overscanY;
+	private int overscanNativeX;
+	private int overscanNativeY;
+	/** Display region inside the overscanned image, in NDC: the projection was pre-scaled by (sx, sy). */
+	private float overscanScaleX = 1.0f;
+	private float overscanScaleY = 1.0f;
+	/** Native (window) size of the visible part of the world layer. */
+	private int worldDisplayW;
+	private int worldDisplayH;
+	private @Nullable GpuTextureView nativeWorld;
+	private @Nullable GpuBuffer cropUbo;
+	// The frame's GlobalSettingsUniform arguments, re-issued with the overscan size while it is active.
+	private @Nullable GlobalSettingsUniform globalSettings;
+	private double gsGlint;
+	private long gsGameTime;
+	private float gsPartialTicks;
+	private int gsMenuBlur;
+	private Vec3 gsCameraPos = Vec3.ZERO;
+	private boolean gsRgss;
+
 	// Persistent resources --------------------------------------------------------------------------------------
 	private @Nullable GpuTexture handTexture;
 	private @Nullable GpuTextureView handView;
@@ -135,7 +174,7 @@ public final class FrameCapture {
 			FrameGenConfig c = FrameGenConfig.get();
 			this.snapshot.note("FrameGen debug snapshot");
 			this.snapshot.note("config: enabled=" + c.enabled + " mode=" + c.mode + " quality=" + c.quality + " sharpHud=" + c.sharpHud
-				+ " multiplier=" + c.multiplier + " targetOutputFps=" + c.targetOutputFps);
+				+ " multiplier=" + c.multiplier + " targetOutputFps=" + c.targetOutputFps + " overscan=" + c.overscan);
 			this.snapshot.note("window: " + mc.getWindow().getWidth() + "x" + mc.getWindow().getHeight() + " guiScale=" + mc.getWindow().getGuiScale()
 				+ " | " + FrameGenEngine.describeWindow());
 			this.snapshot.note("device: " + RenderSystem.getDevice().getDeviceInfo().name() + " / " + RenderSystem.getDevice().getDeviceInfo().driverInfo()
@@ -190,38 +229,63 @@ public final class FrameCapture {
 	public void beforeHand(CameraRenderState camera, boolean consistentDepthRequired) {
 		if (this.snapshot != null) {
 			this.snapshot.note("A beforeHand: splitPlanned=" + this.splitPlanned + " record=" + (this.record != null) + " projectionSet=" + this.levelProjectionSet
-				+ " panoramic=" + camera.isPanoramicMode + " consistentDepthRequired=" + consistentDepthRequired);
+				+ " panoramic=" + camera.isPanoramicMode + " consistentDepthRequired=" + consistentDepthRequired + " overscan=" + this.overscanActive);
 		}
-		if (!this.splitPlanned || this.record == null || !this.levelProjectionSet || camera.isPanoramicMode) return;
 		Minecraft mc = Minecraft.getInstance();
-		RenderTarget main = mc.gameRenderer.mainRenderTarget();
+		// With overscan, the level was rendered into the larger overscan target; the real main target is restored below.
+		RenderTarget source = mc.gameRenderer.mainRenderTarget();
+		RenderTarget main = this.overscanActive && this.overscanSavedMain != null ? this.overscanSavedMain : source;
+		if (!this.splitPlanned || this.record == null || !this.levelProjectionSet || camera.isPanoramicMode) {
+			this.endOverscan();
+			return;
+		}
 		GpuTexture color = main.getColorTexture();
-		GpuTexture depth = main.getDepthTexture();
-		if (color == null || depth == null || main.getColorTextureView() == null || main.getDepthTextureView() == null) return;
+		if (color == null || main.getColorTextureView() == null || main.getDepthTextureView() == null
+			|| source.getColorTextureView() == null || source.getDepthTextureView() == null) {
+			this.endOverscan();
+			return;
+		}
 
 		int nw = Math.max(1, mc.getWindow().getWidth());
 		int nh = Math.max(1, mc.getWindow().getHeight());
-		GpuSlot slot = this.exchange.acquire(GpuSlot.Kind.WORLD, nw, nh, 30L);
-		if (slot == null) return;
+		boolean overscan = this.overscanActive;
+		int sw = overscan ? nw + 2 * this.overscanNativeX : nw;
+		int sh = overscan ? nh + 2 * this.overscanNativeY : nh;
+		GpuSlot slot = this.exchange.acquire(GpuSlot.Kind.WORLD, sw, sh, 30L);
+		if (slot == null) {
+			this.endOverscan();
+			return;
+		}
 		this.worldSlot = slot;
 		this.levelTarget = main;
 		this.scaled = main.width != nw || main.height != nh;
+		this.worldDisplayW = nw;
+		this.worldDisplayH = nh;
 		CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
-		if (!this.scaled) {
-			// Copies are render passes, not copyTextureToTexture: those go through a shared read framebuffer whose
-			// state other code can leave broken (see GlCommandEncoderMixin). At 1:1 the box filter is an exact copy.
-			this.downsample(encoder, main.getColorTextureView(), slot.colorView);
-			this.downsampleDepth(encoder, main.getDepthTextureView(), slot.depthView);
-		} else {
+		// Copies are render passes, not copyTextureToTexture: those go through a shared read framebuffer whose state
+		// other code can leave broken (see GlCommandEncoderMixin). At 1:1 the box filter is an exact copy.
+		this.downsample(encoder, source.getColorTextureView(), slot.colorView);
+		this.downsampleDepth(encoder, source.getDepthTextureView(), slot.depthView);
+		if (this.snapshot != null && overscan) {
+			this.snapshot.capture(source.getColorTexture(), "A_overscan_target");
+		}
+		if (overscan) {
+			// Put the exact vanilla view (the centre) into the real main target, then hand rendering resumes there.
+			this.crop(encoder, source, main);
+			this.endOverscan();
+			this.overscanUsed = true;
+		}
+		if (this.scaled || overscan) {
+			// Main-target-sized copy of the world, to put back under the hand (hook B).
 			this.hiresWorld = this.ensureTemp(this.hiresWorld, "FrameGen hi-res world", main.width, main.height);
 			this.downsample(encoder, main.getColorTextureView(), this.hiresWorld);
-			this.downsample(encoder, main.getColorTextureView(), slot.colorView);
-			this.downsampleDepth(encoder, main.getDepthTextureView(), slot.depthView);
 		}
 		this.worldCaptured = true;
 
 		FrameRecord r = this.record;
 		r.projection.set(this.levelProjection);
+		r.overscanX = overscan ? this.overscanScaleX : 1.0f;
+		r.overscanY = overscan ? this.overscanScaleY : 1.0f;
 		r.viewRotation.set(camera.viewRotationMatrix);
 		r.camX = camera.pos.x;
 		r.camY = camera.pos.y;
@@ -235,13 +299,136 @@ public final class FrameCapture {
 		this.handSplit = FrameGenConfig.get().sharpHud && !consistentDepthRequired;
 		if (this.snapshot != null) {
 			this.snapshot.note("A main target " + main.width + "x" + main.height + " (" + System.identityHashCode(main) + ") scaled=" + this.scaled
-				+ " worldSlot=" + slot.width + "x" + slot.height + " handSplit=" + this.handSplit);
+				+ " worldSlot=" + slot.width + "x" + slot.height + " overscan=" + overscan + " (" + this.overscanX + "," + this.overscanY + " px, scale "
+				+ this.overscanScaleX + "," + this.overscanScaleY + ") handSplit=" + this.handSplit);
 			this.snapshot.capture(color, "A_main_world_before_hand");
 			this.snapshot.capture(this.worldSlot.color, "A_world_slot");
 		}
 		if (this.handSplit) {
 			encoder.clearColorTexture(color, TRANSPARENT);
 		}
+	}
+
+	// ==== Overscan ================================================================================================
+
+	/** {@code GameRenderer.render}: the arguments of this frame's global uniform update. */
+	public void onGlobalSettings(GlobalSettingsUniform uniform, double glint, long gameTime, float partialTicks, int menuBlur, Vec3 cameraPos, boolean rgss) {
+		this.globalSettings = uniform;
+		this.gsGlint = glint;
+		this.gsGameTime = gameTime;
+		this.gsPartialTicks = partialTicks;
+		this.gsMenuBlur = menuBlur;
+		this.gsCameraPos = cameraPos;
+		this.gsRgss = rgss;
+	}
+
+	/**
+	 * Hook O, start of {@code renderLevel}: render the level with a wider view than the screen shows. The main target
+	 * is swapped for one that is larger by the overscan margin on every side, and the projection is pre-scaled in clip
+	 * space by exactly the size ratio, so the centre of the larger image is pixel-for-pixel the vanilla image (it is
+	 * cropped back out before the hand renders, hook A). Generated frames use the margin for screen edges that come
+	 * into view while turning, instead of stretching the last edge pixels.
+	 *
+	 * <p>Working on the main target itself (rather than the window size) keeps resolution-scaling mods working: their
+	 * larger main target simply gets a proportionally larger margin, and they find their usual image after the crop.
+	 */
+	public void beginOverscan(GameRenderer gameRenderer) {
+		if (this.overscanActive) return;
+		FrameGenConfig config = FrameGenConfig.get();
+		int percent = config.overscan;
+		if (!this.splitPlanned || this.record == null || percent <= 0 || !config.sharpHud) return;
+		var state = gameRenderer.gameRenderState();
+		CameraRenderState camera = state.levelRenderState.cameraRenderState;
+		if (camera.isPanoramicMode || this.globalSettings == null) return;
+		// Post effects and entity outlines work on the main target after the level; they need the plain framing.
+		if (!((GameRendererAccessor) gameRenderer).framegen$appliedPostEffects().isEmpty()) return;
+		for (EntityRenderState entity : state.levelRenderState.entityRenderStates) {
+			if (entity.appearsGlowing()) return;
+		}
+		RenderTarget main = gameRenderer.mainRenderTarget();
+		if (main.getColorTexture() == null || main.getDepthTexture() == null) return;
+		Minecraft mc = Minecraft.getInstance();
+		int nw = Math.max(1, mc.getWindow().getWidth());
+		int nh = Math.max(1, mc.getWindow().getHeight());
+		this.overscanNativeX = Math.max(1, Math.round(nw * percent / 100.0f));
+		this.overscanNativeY = Math.max(1, Math.round(nh * percent / 100.0f));
+		// Same margin in render-target pixels when another mod renders above native resolution.
+		this.overscanX = (int) Math.round(this.overscanNativeX * (double) main.width / nw);
+		this.overscanY = (int) Math.round(this.overscanNativeY * (double) main.height / nh);
+		int ow = main.width + 2 * this.overscanX;
+		int oh = main.height + 2 * this.overscanY;
+		if (this.overscanTarget == null) {
+			this.overscanTarget = new TextureTarget("FrameGen overscan", ow, oh, GpuFormat.RGBA8_UNORM, GpuFormat.D32_FLOAT);
+		} else if (this.overscanTarget.width != ow || this.overscanTarget.height != oh) {
+			this.overscanTarget.resize(ow, oh);
+		}
+		if (this.overscanTarget.width != ow || this.overscanTarget.height != oh) return; // allocation fell back to another size
+		this.overscanScaleX = (float) main.width / ow;
+		this.overscanScaleY = (float) main.height / oh;
+
+		this.overscanSavedMain = main;
+		this.overscanCamera = camera;
+		this.overscanSavedProjection.set(camera.projectionMatrix);
+		camera.projectionMatrix.scaleLocal(this.overscanScaleX, this.overscanScaleY, 1.0f);
+		((GameRendererAccessor) gameRenderer).framegen$setMainRenderTarget(this.overscanTarget);
+		// Screen-size-dependent shaders (line widths) must see the size actually rendered to.
+		this.globalSettings.update(ow, oh, this.gsGlint, this.gsGameTime, this.gsPartialTicks, this.gsMenuBlur, this.gsCameraPos, this.gsRgss);
+		this.overscanActive = true;
+	}
+
+	/** Undoes {@link #beginOverscan}: the real main target, projection and global uniforms are back in place. */
+	public void endOverscan() {
+		if (!this.overscanActive) return;
+		this.overscanActive = false;
+		GameRenderer gameRenderer = Minecraft.getInstance().gameRenderer;
+		RenderTarget main = this.overscanSavedMain;
+		if (main != null) {
+			((GameRendererAccessor) gameRenderer).framegen$setMainRenderTarget(main);
+			if (this.globalSettings != null) {
+				this.globalSettings.update(main.width, main.height, this.gsGlint, this.gsGameTime, this.gsPartialTicks, this.gsMenuBlur, this.gsCameraPos, this.gsRgss);
+			}
+		}
+		if (this.overscanCamera != null) {
+			this.overscanCamera.projectionMatrix.set(this.overscanSavedProjection);
+		}
+		this.overscanSavedMain = null;
+		this.overscanCamera = null;
+	}
+
+	/** Copies the centre of {@code source} (color and depth) 1:1 into {@code target}. */
+	private void crop(CommandEncoder encoder, RenderTarget source, RenderTarget target) {
+		if (this.cropUbo == null) {
+			this.cropUbo = RenderSystem.getDevice().createBuffer(() -> "FrameGen crop UBO", GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_COPY_DST, 16);
+		}
+		try (MemoryStack stack = MemoryStack.stackPush()) {
+			ByteBuffer data = Std140Builder.onStack(stack, 16)
+				.putVec4((source.width - target.width) / 2, (source.height - target.height) / 2, target.width, target.height)
+				.get();
+			encoder.writeToBuffer(this.cropUbo.slice(), data);
+		}
+		GpuTextureView sourceColor = source.getColorTextureView();
+		GpuTextureView sourceDepth = source.getDepthTextureView();
+		GpuBuffer ubo = this.cropUbo;
+		this.fullscreenPass(encoder, "FrameGen overscan crop", target.getColorTextureView(), FrameGenPipelines.CROP, pass -> {
+			pass.setUniform("InSampler", sourceColor, nearest());
+			pass.setUniform("FrameGenCrop", ubo.slice());
+		});
+		RenderPassDescriptor descriptor = RenderPassDescriptor.builder(() -> "FrameGen overscan crop depth").withDepthAttachment(target.getDepthTextureView()).build();
+		try (RenderPass pass = encoder.createRenderPass(descriptor)) {
+			pass.setUniform("InSampler", sourceDepth, nearest());
+			pass.setUniform("FrameGenCrop", ubo.slice());
+			pass.setPipeline(RenderSystem.getCompiledPipeline(FrameGenPipelines.CROP_DEPTH));
+			pass.draw(3, 1, 0, 0);
+		}
+	}
+
+	/** The world at native resolution without the overscan margin (for rebuilding the real frame). */
+	private GpuTextureView nativeWorld(CommandEncoder encoder) {
+		if (!this.overscanUsed) return this.worldSlot.colorView;
+		if (!this.scaled) return this.hiresWorld; // the cropped main-target copy is already native size
+		this.nativeWorld = this.ensureTemp(this.nativeWorld, "FrameGen native world", this.worldDisplayW, this.worldDisplayH);
+		this.downsample(encoder, this.hiresWorld, this.nativeWorld);
+		return this.nativeWorld;
 	}
 
 	/** Hook B: end of {@code GameRenderer.renderLevel}. */
@@ -258,7 +445,7 @@ public final class FrameCapture {
 		GpuTextureView mainColor = main.getColorTextureView();
 		GpuTextureView mainDepth = main.getDepthTextureView();
 		if (mainColor == null || mainDepth == null) return;
-		this.ensureHandTexture(this.worldSlot.width, this.worldSlot.height);
+		this.ensureHandTexture(this.worldDisplayW, this.worldDisplayH);
 		CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
 		// Hand layer for the presenter (native size, coverage from alpha or depth, see fg_hand_capture).
 		this.fullscreenPass(encoder, "FrameGen capture hand", this.handView, FrameGenPipelines.HAND_CAPTURE, pass -> {
@@ -268,7 +455,7 @@ public final class FrameCapture {
 		// Put the world back underneath the hand so everything after this point sees the vanilla image.
 		this.handRaw = this.ensureTemp(this.handRaw, "FrameGen hand (full size)", main.width, main.height);
 		this.downsample(encoder, mainColor, this.handRaw);
-		GpuTextureView world = this.scaled ? this.hiresWorld : this.worldSlot.colorView;
+		GpuTextureView world = this.scaled || this.overscanUsed ? this.hiresWorld : this.worldSlot.colorView;
 		GpuTextureView hand = this.handRaw;
 		this.fullscreenPass(encoder, "FrameGen restore world", mainColor, FrameGenPipelines.HAND_RESTORE, pass -> {
 			pass.setUniform("HandSampler", hand, nearest());
@@ -289,6 +476,14 @@ public final class FrameCapture {
 			this.snapshot.note("B2 afterPostEffects: postEffects=" + postEffectsApplied + " entityOutline=" + levelRenderer.framegen$rendersEntityOutline());
 		}
 		if (postEffectsApplied || levelRenderer.framegen$rendersEntityOutline()) {
+			if (this.overscanUsed) {
+				// Overscan is skipped when these are known in advance; if one appeared anyway, the frame can't be
+				// separated into layers (the world layer is framed differently). Show it as is.
+				this.exchange.abandon(this.worldSlot);
+				this.worldSlot = null;
+				this.worldCaptured = false;
+				return;
+			}
 			// Something drew over the hand: the separated layers no longer add up. Bake everything into the world.
 			RenderTarget main = this.levelTarget;
 			CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
@@ -363,7 +558,7 @@ public final class FrameCapture {
 		} else if (this.redirectActive && ++this.framesWithoutRedirect > 120) {
 			this.redirectActive = false;
 		}
-		boolean layered = this.worldCaptured && this.worldSlot != null && !lost && this.worldSlot.width == w && this.worldSlot.height == h;
+		boolean layered = this.worldCaptured && this.worldSlot != null && !lost && this.worldDisplayW == w && this.worldDisplayH == h;
 		if (this.snapshot != null) {
 			this.snapshot.note("D finishFrame: presented " + w + "x" + h + " isGuiTarget=" + (presented == this.guiTarget) + " guiSplit=" + this.guiSplit
 				+ " handSplit=" + this.handSplit + " baseCaptured=" + this.baseCaptured + " lost=" + lost + " layered=" + layered
@@ -390,7 +585,7 @@ public final class FrameCapture {
 				this.rebuildPresented(encoder, mainColor, vignette, overlay.colorView, w, h);
 			} else {
 				// HUD separation disabled: the whole frame minus the world is not separable, so the overlay is empty
-				// and the world layer is the full image (HUD gets warped with the world).
+				// and the world layer is the full image (HUD gets warped with the world). Overscan is off then.
 				encoder.clearColorTexture(overlay.color, TRANSPARENT);
 				this.downsample(encoder, mainColor, this.worldSlot.colorView);
 			}
@@ -458,8 +653,8 @@ public final class FrameCapture {
 				pass.setUniform("VignetteSampler", vignette, linear());
 				pass.setUniform("FrameGenComposite", this.compositeUbo.slice(256, 32));
 			});
-		} else if (overlay != null && this.worldSlot != null && this.worldSlot.width == w && this.worldSlot.height == h) {
-			GpuTextureView world = this.worldSlot.colorView;
+		} else if (overlay != null && this.worldSlot != null && this.worldDisplayW == w && this.worldDisplayH == h) {
+			GpuTextureView world = this.nativeWorld(encoder);
 			this.writeCompositeUbo(encoder, 1, this.handSplit);
 			this.fullscreenPass(encoder, "FrameGen rebuild frame", target, FrameGenPipelines.FINAL, pass -> {
 				pass.setUniform("OverlaySampler", overlay, nearest());
@@ -486,6 +681,8 @@ public final class FrameCapture {
 	// ==== Helpers =================================================================================================
 
 	private void resetFrame() {
+		this.endOverscan();
+		this.overscanUsed = false;
 		if (this.worldSlot != null) {
 			this.exchange.abandon(this.worldSlot);
 			this.worldSlot = null;
@@ -680,7 +877,11 @@ public final class FrameCapture {
 		if (this.blankTexture != null) this.blankTexture.close();
 		if (this.compositeUbo != null) this.compositeUbo.close();
 		if (this.quadUbo != null) this.quadUbo.close();
-		for (GpuTextureView temp : new GpuTextureView[]{this.hiresWorld, this.baseImage, this.guiCopy, this.handRaw}) {
+		if (this.cropUbo != null) this.cropUbo.close();
+		if (this.overscanTarget != null) this.overscanTarget.destroyBuffers();
+		this.cropUbo = null;
+		this.overscanTarget = null;
+		for (GpuTextureView temp : new GpuTextureView[]{this.hiresWorld, this.baseImage, this.guiCopy, this.handRaw, this.nativeWorld}) {
 			if (temp != null) {
 				GpuTexture texture = temp.texture();
 				temp.close();
@@ -691,6 +892,7 @@ public final class FrameCapture {
 		this.baseImage = null;
 		this.guiCopy = null;
 		this.handRaw = null;
+		this.nativeWorld = null;
 		this.handView = null;
 		this.handTexture = null;
 		this.blankView = null;

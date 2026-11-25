@@ -4,12 +4,13 @@ You are taking over **FrameGen**, a Fabric mod for **Minecraft 26.3** that does 
 session ran out of context. This file is everything you need. Read it fully, then read the code it points to
 before changing anything.
 
-- **Repo:** `aktus11-creator/random`. **Work branch: `claude/epic-cori-5h5iyh`.** Commit and push there; never
+- **Repo:** `aktus11-creator/random`. **Work branch: `claude/magical-euler-cfwal6`.** Commit and push there; never
   open a PR unless asked.
 - **Author / user:** Aktus1_1. They play on their own Windows PC, and you can't reach their machine. They test
   each release and report back in short, casual messages. Keep replies short and plain, and lead with what
   changed and the download link.
-- **Current version:** 1.4.2, plus one later commit that only fixes the Max Prediction tooltip text.
+- **Current version:** see `gradle.properties` and the changelog in `README.md`. (Branch history: 1.0–1.4.2 were
+  made on `claude/epic-cori-5h5iyh`; from 1.5.0 on, work continues on `claude/magical-euler-cfwal6`.)
 - **Your task:** implement the four improvements in "The work" below, one release per improvement. Test each in
   the dev environment before releasing.
 
@@ -46,6 +47,12 @@ cd /home/user/random
     runs a **reprojection self-test** every ~3 s (`[self-test] … PSNR …`, `[bench] … ms/frame`).
 - **A test world already exists** at `run/saves/fgtest` (creative). If not (fresh clone), create one through the
   UI and rename the save folder to `fgtest`. Then: `devtools/runmc.sh /tmp/r.log --quickPlaySingleplayer fgtest`.
+- **Shortcuts** (added in 1.5.0): `devtools/startmc.sh <log>` starts the client in `fgtest` and waits until
+  frames are generated; `devtools/setcfg.py key=value…` edits `run/config/framegen.json` (do it while the game is
+  stopped); `devtools/turntest.sh <log> [dx] [steps]` turns the camera and prints the self-test lines;
+  `devtools/burst.sh <prefix> [dx] [n]` grabs screenshots during a turn. `xin.py type:` now handles shifted
+  characters, e.g. `"type:/summon pig ^ ^ ^4 {Glowing:1b}"` after `key:t`. `/tick freeze` makes the world static
+  for pixel comparisons (screenshots with F8 on vs off).
 - **Driving the game:** `python3 devtools/xin.py <cmds…>` sends X input via XTest. Commands: `click:x:y`,
   `key:Escape`, `key:F9`, `down:w`/`up:w`, `rel:dx:dy:count` (mouse look), `sleep:s`, `type:text`. The game
   window is 854×480 at screen offset (213,120), so screen coords = window coords + (213,120).
@@ -76,7 +83,7 @@ cd /home/user/random
   - They asked us to **undo** the delay-reduction changes. Any latency work must not make low-FPS motion less
     smooth.
   - They **can't download files from chat**. Always give the GitHub raw link:
-    `https://github.com/Aktus11-creator/random/raw/claude/epic-cori-5h5iyh/release/framegen-<version>.jar`.
+    `https://github.com/Aktus11-creator/random/raw/claude/magical-euler-cfwal6/release/framegen-<version>.jar`.
 
 ## 3. Architecture (read the code: `src/client/java/dev/framegen/`)
 
@@ -193,7 +200,7 @@ Source of its renderer was shared; key behavior:
 4. `git rm release/framegen-<old>.jar`, then copy `build/libs/framegen-<new>.jar` into `release/`. Keep only the
    newest jar there.
 5. Commit with a descriptive message ending with the attribution lines the system tells you to use, then
-   `git push origin claude/epic-cori-5h5iyh`.
+   `git push origin claude/magical-euler-cfwal6`.
 6. Tell the user the raw download link and to delete the old FrameGen jar.
 
 If you change the meaning of a config field or a default, add a migration step in `FrameGenConfig.load()` and
@@ -202,6 +209,8 @@ bump `CURRENT_VERSION`.
 ---
 
 ## 6. The work: four improvements (one release each; suggested order)
+
+**Progress:** #2 done in 1.5.0 (see `FrameCapture.beginOverscan` / hook O and `Pose.display`).
 
 ### #2 first: no stretched edges on fast turns (overscan)
 **Problem:** when the camera turns, the newly revealed strip at the screen edge has no source pixels; the warp

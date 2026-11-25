@@ -88,6 +88,10 @@ public final class FrameGenMod implements ClientModInitializer {
 		return Component.translatable("framegen.mode." + mode.name().toLowerCase(Locale.ROOT));
 	}
 
+	public static Component overscanName(int percent) {
+		return percent <= 0 ? Component.translatable("framegen.overscan.off") : Component.translatable("framegen.overscan.value", percent);
+	}
+
 	/** One-line status for the HUD and the settings screen. */
 	public static Component statsLine() {
 		FrameGenConfig config = FrameGenConfig.get();
