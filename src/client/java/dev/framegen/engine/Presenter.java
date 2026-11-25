@@ -111,7 +111,13 @@ public final class Presenter implements Runnable {
 	private java.nio.@Nullable FloatBuffer entBuf;
 	private volatile int statMovingEntities;
 
-	Presenter(FrameExchange exchange, long window, long context, BooleanSupplier iconified) {
+	private final InputLatch inputLatch;
+	private volatile float statCameraDelayMs = Float.NaN;
+	private double cameraDelayAccum;
+	private int cameraDelaySamples;
+
+	Presenter(FrameExchange exchange, long window, long context, BooleanSupplier iconified, InputLatch inputLatch) {
+		this.inputLatch = inputLatch;
 		this.exchange = exchange;
 		this.window = window;
 		this.context = context;
@@ -189,6 +195,11 @@ public final class Presenter implements Runnable {
 
 	public float latencyMs() {
 		return this.statLatencyMs;
+	}
+
+	/** Age of the mouse input the camera was last turned with (responsive camera), NaN if not in use. */
+	public float cameraDelayMs() {
+		return this.statCameraDelayMs;
 	}
 
 	public float presentCostMs() {
@@ -620,6 +631,7 @@ public final class Presenter implements Runnable {
 			// Display time is older than everything we have: show the oldest frame as is.
 			FrameRecord only = worlds.getFirst();
 			this.target.set(only);
+			this.applyResponsiveCamera(config, now);
 			this.drawWarp(config, null, only, 0.0, w, h, null, Double.NaN, 0.0);
 			return;
 		}
@@ -630,6 +642,7 @@ public final class Presenter implements Runnable {
 				a = worlds.get(worlds.size() - 2);
 			} else {
 				this.target.set(newest);
+				this.applyResponsiveCamera(config, now);
 				this.drawWarp(config, null, newest, 0.0, w, h, null, Double.NaN, 0.0);
 				return;
 			}
@@ -650,9 +663,75 @@ public final class Presenter implements Runnable {
 		this.poseA.set(a);
 		this.poseB.set(b);
 		this.target.blend(this.poseA, this.poseB, t);
+		this.applyResponsiveCamera(config, now);
 		boolean useA = t < 1.0 || config.quality.backgroundSearch;
 		this.drawWarp(config, useA ? a : null, b, Math.max(0.0, 1.0 - t), w, h, a, t, displaySim);
 	}
+
+	/**
+	 * Responsive camera: turn the generated frame with the newest mouse input (see {@link InputLatch}) instead of the
+	 * interpolated rotation. Only the rotation changes; the world is still interpolated, so it stays smooth.
+	 */
+	private void applyResponsiveCamera(FrameGenConfig config, long now) {
+		InputLatch.Sample sample = config.responsiveCamera ? this.inputLatch.latest() : null;
+		if (sample == null || now - sample.nanos() > 150_000_000L) {
+			this.inputCount = 0;
+			return;
+		}
+		// Mouse samples arrive in bursts (a few per real frame). Play them back one typical gap late and interpolate
+		// between them, so the camera turns continuously instead of in steps. Never ahead of real input.
+		InputLatch.Sample last = this.inputCount > 0 ? this.inputSamples[(this.inputHead + this.inputCount - 1) % this.inputSamples.length] : null;
+		if (last == null || sample.nanos() != last.nanos()) {
+			if (last != null) {
+				double gap = Math.min(50e6, Math.max(1e6, sample.nanos() - last.nanos()));
+				this.inputGapEma = this.inputGapEma <= 0 ? gap : this.inputGapEma + (gap - this.inputGapEma) * 0.1;
+			}
+			if (this.inputCount == this.inputSamples.length) {
+				this.inputHead = (this.inputHead + 1) % this.inputSamples.length;
+				this.inputCount--;
+			}
+			this.inputSamples[(this.inputHead + this.inputCount) % this.inputSamples.length] = sample;
+			this.inputCount++;
+		}
+		double when = now - Math.max(1e6, this.inputGapEma);
+		InputLatch.Sample before = null;
+		InputLatch.Sample after = null;
+		for (int i = 0; i < this.inputCount; i++) {
+			InputLatch.Sample s = this.inputSamples[(this.inputHead + i) % this.inputSamples.length];
+			if (s.nanos() <= when) {
+				before = s;
+			} else {
+				after = s;
+				break;
+			}
+		}
+		float yaw;
+		float pitch;
+		double shownNanos;
+		if (before == null) {
+			InputLatch.Sample first = this.inputSamples[this.inputHead];
+			yaw = first.yaw();
+			pitch = first.pitch();
+			shownNanos = first.nanos();
+		} else if (after == null) {
+			yaw = before.yaw();
+			pitch = before.pitch();
+			shownNanos = before.nanos();
+		} else {
+			double f = (when - before.nanos()) / Math.max(1.0, after.nanos() - before.nanos());
+			yaw = (float) (before.yaw() + (after.yaw() - before.yaw()) * f);
+			pitch = (float) (before.pitch() + (after.pitch() - before.pitch()) * f);
+			shownNanos = when;
+		}
+		this.target.setYawPitch(yaw, pitch);
+		this.cameraDelayAccum += (now - shownNanos) / 1e6;
+		this.cameraDelaySamples++;
+	}
+
+	private final InputLatch.Sample[] inputSamples = new InputLatch.Sample[16];
+	private int inputHead;
+	private int inputCount;
+	private double inputGapEma = -1.0;
 
 	/**
 	 * The playback clock. Returns the simulation timestamp to show at {@code now}.
@@ -1370,9 +1449,10 @@ public final class Presenter implements Runnable {
 			this.statLatencyMs = (float) (Math.max(0.0, this.delayNanos) / 1e6);
 			if (DEBUG_LOG && now - this.lastDebugLog > 2_000_000_000L) {
 				this.lastDebugLog = now;
-				FrameGenMod.LOGGER.info("[presenter] out {} fps, real {} fps, generating={}, delay {} ms, latency~{} ms, interval~{} ms, cost {} ms, gpu {} ms, history {}, inflight {}",
+				FrameGenMod.LOGGER.info("[presenter] out {} fps, real {} fps, generating={}, delay {} ms, turning {} ms, latency~{} ms, interval~{} ms, cost {} ms, gpu {} ms, history {}, inflight {}",
 					String.format("%.1f", this.statOutputFps), String.format("%.1f", this.statRealFps), this.statGenerating + (this.statNative ? " (native)" : ""),
-					String.format("%.1f", this.statLatencyMs), String.format("%.1f", this.latencyHigh / 1e6), String.format("%.1f", this.intervalHigh / 1e6),
+					String.format("%.1f", this.statLatencyMs), this.cameraDelaySamples > 0 ? String.format("%.1f", this.cameraDelayAccum / this.cameraDelaySamples) : "-",
+					String.format("%.1f", this.latencyHigh / 1e6), String.format("%.1f", this.intervalHigh / 1e6),
 					String.format("%.2f", this.statPresentCostMs), String.format("%.3f", this.statGpuMs), this.history.size(), this.inflight.size());
 			}
 			this.statOutputFrames = 0;
@@ -1383,6 +1463,9 @@ public final class Presenter implements Runnable {
 				this.gpuMsAccum = 0.0;
 				this.gpuSamples = 0;
 			}
+			this.statCameraDelayMs = this.cameraDelaySamples > 0 ? (float) (this.cameraDelayAccum / this.cameraDelaySamples) : Float.NaN;
+			this.cameraDelayAccum = 0.0;
+			this.cameraDelaySamples = 0;
 			this.statWindowStart = now;
 		}
 	}

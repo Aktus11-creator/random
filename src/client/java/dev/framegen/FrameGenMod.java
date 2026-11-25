@@ -119,6 +119,12 @@ public final class FrameGenMod implements ClientModInitializer {
 		if (!p.isGenerating()) {
 			return Component.translatable("framegen.stats.idle", fmt(p.realFps()));
 		}
+		float turning = p.cameraDelayMs();
+		if (!Float.isNaN(turning)) {
+			return Component.translatable("framegen.stats.on_responsive",
+				fmt(p.outputFps()), fmt(p.realFps()), modeName(config.mode), String.format(Locale.ROOT, "%.1f", p.latencyMs()),
+				String.format(Locale.ROOT, "%.1f", turning), String.format(Locale.ROOT, "%.2f", p.presentCostMs()));
+		}
 		return Component.translatable("framegen.stats.on",
 			fmt(p.outputFps()), fmt(p.realFps()), modeName(config.mode), String.format(Locale.ROOT, "%.1f", p.latencyMs()),
 			String.format(Locale.ROOT, "%.2f", p.presentCostMs()));

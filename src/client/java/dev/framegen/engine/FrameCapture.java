@@ -150,7 +150,10 @@ public final class FrameCapture {
 	private @Nullable Object lastCameraEntity;
 	private long lastWorldPublishNanos;
 
-	FrameCapture(FrameExchange exchange, boolean zZeroToOne) {
+	private final InputLatch inputLatch;
+
+	FrameCapture(FrameExchange exchange, boolean zZeroToOne, InputLatch inputLatch) {
+		this.inputLatch = inputLatch;
 		this.exchange = exchange;
 		this.zZeroToOne = zZeroToOne;
 	}
@@ -169,6 +172,7 @@ public final class FrameCapture {
 		FrameGenConfig config = FrameGenConfig.get();
 		this.splitPlanned = config.enabled && FrameGenEngine.isPresenterRunning() && mc.level != null && mc.gui.screen() == null && mc.gui.overlay() == null
 			&& !this.redirectActive;
+		if (!this.splitPlanned) this.inputLatch.invalidate();
 		if (this.snapshotRequested && this.splitPlanned) {
 			this.snapshotRequested = false;
 			this.snapshot = new DebugSnapshot();
@@ -228,6 +232,7 @@ public final class FrameCapture {
 	 * the world is box-filtered down instead, so the presenter works at native resolution and memory use stays flat.
 	 */
 	public void beforeHand(CameraRenderState camera, boolean consistentDepthRequired) {
+		this.inputLatch.sample();
 		if (this.snapshot != null) {
 			this.snapshot.note("A beforeHand: splitPlanned=" + this.splitPlanned + " record=" + (this.record != null) + " projectionSet=" + this.levelProjectionSet
 				+ " panoramic=" + camera.isPanoramicMode + " consistentDepthRequired=" + consistentDepthRequired + " overscan=" + this.overscanActive);
@@ -392,6 +397,11 @@ public final class FrameCapture {
 	 * larger main target simply gets a proportionally larger margin, and they find their usual image after the crop.
 	 */
 	public void beginLevel(GameRenderer gameRenderer) {
+		if (this.splitPlanned && this.record != null) {
+			this.inputLatch.beginFrame(gameRenderer.gameRenderState().levelRenderState.cameraRenderState);
+		} else {
+			this.inputLatch.invalidate();
+		}
 		if (this.splitPlanned && this.record != null && FrameGenConfig.get().movingObjects) {
 			// The level renderer clears this list while rendering, so take it now.
 			var levelState = gameRenderer.gameRenderState().levelRenderState;
@@ -501,6 +511,7 @@ public final class FrameCapture {
 
 	/** Hook B: end of {@code GameRenderer.renderLevel}. */
 	public void afterLevel() {
+		this.inputLatch.sample();
 		if (this.snapshot != null) {
 			RenderTarget now = Minecraft.getInstance().gameRenderer.mainRenderTarget();
 			this.snapshot.note("B afterLevel: handSplit=" + this.handSplit + " worldSlot=" + (this.worldSlot != null) + " levelTarget=" + (this.levelTarget != null)
@@ -566,6 +577,7 @@ public final class FrameCapture {
 	 * real frame, then clear the target so the GUI renders onto transparent.
 	 */
 	public void beforeGui() {
+		this.inputLatch.sample();
 		if (!this.worldCaptured || !FrameGenConfig.get().sharpHud) return;
 		RenderTarget current = Minecraft.getInstance().gameRenderer.mainRenderTarget();
 		if (current.getColorTexture() == null) return;
@@ -590,6 +602,7 @@ public final class FrameCapture {
 	 * Returns false if nothing could be captured (the frame is then simply not published).
 	 */
 	public boolean finishFrame(GpuTextureView mainColor) {
+		this.inputLatch.sample();
 		FrameRecord r = this.record;
 		if (r == null) {
 			r = this.record = this.exchange.newRecord();
@@ -735,6 +748,7 @@ public final class FrameCapture {
 
 	/** After {@code CommandEncoder.submit()}: fence the frame's GPU work and hand it to the presenter. */
 	public @Nullable FrameRecord publish() {
+		this.inputLatch.sample();
 		FrameRecord r = this.record;
 		this.record = null;
 		if (r == null || r.overlay == null) {
@@ -939,6 +953,7 @@ public final class FrameCapture {
 
 	void close() {
 		this.resetFrame();
+		this.inputLatch.close();
 		if (this.handView != null) this.handView.close();
 		if (this.handTexture != null) this.handTexture.close();
 		if (this.blankView != null) this.blankView.close();

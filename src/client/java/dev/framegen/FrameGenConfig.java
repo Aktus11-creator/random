@@ -64,6 +64,8 @@ public final class FrameGenConfig {
 	public volatile int overscan = 8;
 	/** Move the pixels of mobs, players, items etc. with them in generated frames (instead of only the camera). */
 	public volatile boolean movingObjects = true;
+	/** Turn the camera in generated frames with the newest mouse input (see InputLatch). */
+	public volatile boolean responsiveCamera = true;
 	/** Wait for the GPU after every present. Lowers latency and improves pacing on most drivers. */
 	public volatile boolean lowLatencyPresent = true;
 	/** Show the frame generation statistics line in the HUD. */

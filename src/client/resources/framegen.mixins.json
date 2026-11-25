@@ -13,6 +13,7 @@
 		"SkyRendererMixin",
 		"EntityRenderStateMixin",
 		"EntityRendererMixin",
+		"FrameGraphBuilderMixin",
 		"LevelRendererAccessor",
 		"GuiGraphicsExtractorMixin",
 		"GlCommandEncoderMixin",

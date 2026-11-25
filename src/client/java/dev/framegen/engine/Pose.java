@@ -35,6 +35,12 @@ final class Pose {
 		return this;
 	}
 
+	/** Sets the rotation the way Minecraft's camera builds it from yaw and pitch (degrees). */
+	Pose setYawPitch(float yaw, float pitch) {
+		this.rotation.rotationYXZ(Math.PI - Math.toRadians(yaw), -Math.toRadians(pitch), 0.0).conjugate();
+		return this;
+	}
+
 	/** Produce output framed like the source image itself, margin included (self-test). */
 	Pose showAsRendered() {
 		this.display.set(this.projection);

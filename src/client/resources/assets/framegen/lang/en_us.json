@@ -41,6 +41,8 @@
 	"framegen.option.overscan.tooltip": "Renders a little more of the world than fits on screen (this much extra on every side). When you turn fast, generated frames show the real scenery at the screen edges instead of stretched edge pixels. Real frames look exactly the same. Costs GPU time: 8% renders about 35% more pixels. Off when post effects or glowing entities are on screen.",
 	"framegen.option.moving_objects": "Smooth Moving Objects",
 	"framegen.option.moving_objects.tooltip": "Move mobs, players, items, minecarts and boats smoothly in generated frames, instead of only the camera. Walking and turning are smoothed; limb animations still update at the real frame rate.",
+	"framegen.option.responsive_camera": "Responsive Camera",
+	"framegen.option.responsive_camera.tooltip": "Turn the camera in generated frames with your newest mouse movement, instead of waiting for the next real frame. Turning reacts sooner while the world stays as smooth as before. It uses your real mouse input, not a prediction, so it never overshoots. First person only.",
 	"framegen.option.sharp_hud": "Sharp HUD and Hand",
 	"framegen.option.sharp_hud.tooltip": "Keep the HUD and your first-person hand out of the reprojection so they never wobble or smear. Disable only if another mod draws HUD elements that look wrong.",
 	"framegen.option.extrapolation": "Max Prediction",
@@ -58,5 +60,6 @@
 	"framegen.stats.idle": "FrameGen idle (menu) | %s fps",
 	"framegen.stats.redirected": "FrameGen paused | %s fps (another mod, e.g. Supersample, is changing the render resolution)",
 	"framegen.stats.native": "FrameGen native | %s fps (game already keeps up with the display, nothing to generate)",
-	"framegen.stats.on": "FrameGen %s fps (real %s) | %s | delay %s ms | present %s ms"
+	"framegen.stats.on": "FrameGen %s fps (real %s) | %s | delay %s ms | present %s ms",
+	"framegen.stats.on_responsive": "FrameGen %s fps (real %s) | %s | delay %s ms, turning %s ms | present %s ms"
 }

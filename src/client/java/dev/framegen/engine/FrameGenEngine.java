@@ -29,6 +29,7 @@ public final class FrameGenEngine {
 	private static @Nullable FrameGenSurface surface;
 	private static @Nullable Presenter presenter;
 	private static @Nullable FrameCapture capture;
+	private static final InputLatch inputLatch = new InputLatch();
 	private static long window;
 	private static long lastDisplayPoll;
 	private static volatile @Nullable Throwable presenterCrash;
@@ -84,7 +85,7 @@ public final class FrameGenEngine {
 		}
 
 		FrameExchange exchange = new FrameExchange();
-		Presenter p = new Presenter(exchange, windowHandle, presenterContext, iconified);
+		Presenter p = new Presenter(exchange, windowHandle, presenterContext, iconified, inputLatch);
 		if (!p.start()) {
 			SDLVideo.SDL_GL_DestroyContext(presenterContext);
 			return fail(vanilla, "presenter thread failed to start (see log)");
@@ -92,7 +93,7 @@ public final class FrameGenEngine {
 
 		window = windowHandle;
 		presenter = p;
-		capture = new FrameCapture(exchange, info.isZZeroToOne());
+		capture = new FrameCapture(exchange, info.isZZeroToOne(), inputLatch);
 		surface = new FrameGenSurface(vanilla, p, exchange, capture, presenterContext, iconified);
 		status = Status.ACTIVE;
 		statusDetail = info.name();
@@ -159,6 +160,11 @@ public final class FrameGenEngine {
 
 	public static @Nullable FrameCapture capture() {
 		return isPresenterRunning() ? capture : null;
+	}
+
+	/** Render thread, any time during a frame: refresh the responsive-camera mouse sample (see {@link InputLatch}). */
+	public static void sampleInput() {
+		if (isPresenterRunning()) inputLatch.sample();
 	}
 
 	public static @Nullable Presenter presenter() {

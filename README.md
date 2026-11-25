@@ -28,6 +28,8 @@ presenter (own thread)    ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ �
     especially at low frame rates, and adds about one real frame of latency.
   - *Extrapolate*: predicts forward from the newest frame. It adds no latency but is less smooth at low frame
     rates and can briefly overshoot when you stop turning.
+- **Responsive camera.** Generated frames turn with your newest mouse movement (real input, not a prediction), so
+  turning reacts sooner while the world stays as smooth as Interpolate makes it.
 - **Smooth mobs, players and items.** Moving entities are moved with their own motion in generated frames (walking,
   flying, riding, turning), not just the camera.
 - **No stretched screen edges.** The world is rendered with a small margin around the screen (*overscan*), so
@@ -85,11 +87,12 @@ Rebind them under *Options → Controls → Key Binds → FrameGen*.
 | Real FPS Limit | **Display rate** (default) means the game never renders more real frames than your display shows. FrameGen only fills in when the game drops below that. *1/2 display* and lower trade real frames for GPU headroom; use them only if the game stutters. *Game limit* uses your Max Framerate. |
 | Output FPS | Presentation rate when V-Sync is off ("Display" = refresh rate). |
 | Overscan | Extra field of view rendered around the screen, per side: Off / 4% / **8%** (default) / … / 24%. Generated frames use it for screen edges coming into view while you turn. Real frames look the same. Costs GPU time: 8% renders about 35% more world pixels. Skipped automatically while post effects or glowing entities are on screen. |
+| Responsive Camera | Turns the camera in generated frames with your newest mouse input instead of the interpolated rotation (on by default). First person only; off while riding, sleeping or with Cinematic Camera. |
 | Smooth Moving Objects | Moves mobs, players, items, minecarts and boats in generated frames (on by default). Limb animations still update at the real frame rate. |
 | Sharp HUD and Hand | Keeps HUD and hand out of the reprojection. Disable only if another mod's HUD looks wrong. |
 | Max Prediction | Extrapolate mode only: how far past the newest real frame the camera may be predicted, in real frames. It has no effect with Interpolate. |
 | Low Latency Present | Waits for each present to complete. This gives lower latency and steadier pacing on most drivers. |
-| Show Stats | `FrameGen 144 fps (real 72) | Interpolate | delay 21 ms | present 0.3 ms`, or `FrameGen native` when the game already keeps up. |
+| Show Stats | `FrameGen 144 fps (real 72) | Interpolate | delay 21 ms, turning 6 ms | present 0.3 ms` (*turning* is the age of the mouse input the camera was turned with), or `FrameGen native` when the game already keeps up. |
 | Debug View | Tints pixels the reprojection couldn't reconstruct confidently in magenta, and pixels moved with an entity in blue. |
 
 The settings are stored in `config/framegen.json`.
@@ -135,6 +138,12 @@ The settings are stored in `config/framegen.json`.
   that is `W × H` instead of `w × h`. The centre `w × h` pixels are then exactly the normal image (pixel centres
   line up), and the culling frustum is widened to match. The presenter reads source frames with this wider
   projection and produces output with the normal one.
+- Responsive camera: Minecraft reads input once per real frame. While a frame renders, the render thread (SDL's
+  main thread) pumps SDL's event queue a few times (between level render passes, before the GUI, at present) and
+  peeks at the mouse motion waiting there without removing it, so the game still gets every event. That motion,
+  put through the game's own sensitivity formula and added to the frame's camera rotation, is the rotation the next
+  frame will have. The presenter plays these samples back one sample-gap late, interpolating between them, and uses
+  that rotation for generated frames. The world (position, entities) is still interpolated as before.
 - Moving entities: each real frame records every rendered entity's id, position, velocity and body yaw, plus a box
   around it that turns with the body. For a generated frame, the presenter places each entity where it is at that
   moment (interpolated between the two real frames, or by its velocity) and the shader moves every source pixel
@@ -190,6 +199,16 @@ Nvidium only enables itself on NVIDIA GPUs with mesh shaders. The test machine h
 disabled; its rendering path was checked by code review, not by running it.
 
 ## Changelog
+
+**1.7.0**
+- **Turning reacts much sooner in Interpolate.** New *Responsive Camera* setting (on by default): generated frames
+  turn with your newest mouse movement instead of waiting for the next real frame. It uses your real input, not
+  a prediction, so it never overshoots when you stop. Walking, the world and mobs stay interpolated and as smooth
+  as before.
+- The stats line shows the new *turning* delay next to the world delay.
+- First person only. Off while riding (boats and horses turn you themselves), sleeping, or with Cinematic Camera.
+- Your mouse input reaches the game exactly as before. The test turned to the same angle with the setting on
+  and off.
 
 **1.6.0**
 - **Mobs, players, items, minecarts and boats now move smoothly** in generated frames, not just the camera.
@@ -277,6 +296,8 @@ disabled; its rendering path was checked by code review, not by running it.
 - Entities move with their position and body turn; limb animations, head turns, particles and animated textures
   update at the real frame rate. Parts of a model that stick far out of its hitbox may not move with it. In
   interpolation mode, conflicting pixels snap to the nearer real frame instead of ghosting.
+- With Responsive Camera, very fast flicks can turn further ahead of the newest real frame than the overscan margin
+  covers, and some edge stretching returns for those moments. Raising Overscan helps.
 - Screen edges that come into view are taken from the overscan margin. A turn larger than the margin between two
   real frames (or overscan off) still shows some edge stretching. Overscan sits out frames with post effects
   (e.g. spectating a creeper) or glowing entities on screen.

@@ -217,7 +217,9 @@ moment, compared with frame 2, with and without entity motion) and dumps images 
 Test scene: a no-AI pig tagged `m` circling via a repeating command block
 (`execute as @e[tag=m] at @s run tp @s ^ ^ ^0.04 ~1 ~`). llvmpipe gotchas found: after startup the playback delay
 can sit at several seconds for ~10 s (wait for `delay` < 1000 ms in the presenter log before judging visuals), and
-updating a uniform buffer that the previous draw used stalls (hence the ring of buffers).
+updating a uniform buffer that the previous draw used stalls (hence the ring of buffers). #3 done in 1.7.0 (`InputLatch`: SDL event peeking on
+the render thread at several points per frame, presenter plays samples back one gap late; `Presenter.applyResponsiveCamera`).
+Verified: final player yaw identical with it on and off for the same XTest input.
 
 ### #2 first: no stretched edges on fast turns (overscan)
 **Problem:** when the camera turns, the newly revealed strip at the screen edge has no source pixels; the warp

@@ -49,6 +49,7 @@ public final class FrameGenScreen extends OptionsSubScreen {
 			outputFpsOption(c),
 			overscanOption(c),
 			bool("framegen.option.moving_objects", c.movingObjects, v -> c.movingObjects = v),
+			bool("framegen.option.responsive_camera", c.responsiveCamera, v -> c.responsiveCamera = v),
 			bool("framegen.option.sharp_hud", c.sharpHud, v -> c.sharpHud = v),
 			extrapolationOption(c),
 			bool("framegen.option.low_latency", c.lowLatencyPresent, v -> c.lowLatencyPresent = v),

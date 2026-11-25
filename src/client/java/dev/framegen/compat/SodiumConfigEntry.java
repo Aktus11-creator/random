@@ -105,6 +105,14 @@ public final class SodiumConfigEntry implements ConfigEntryPoint {
 				.setDefaultValue(true)
 				.setEnabledProvider(s -> s.readBooleanOption(enabledId), enabledId)
 				.setBinding(v -> c.lowLatencyPresent = v, () -> c.lowLatencyPresent)
+				.setStorageHandler(save))
+			.addOption(builder.createBooleanOption(id("responsive_camera"))
+				.setName(Component.translatable("framegen.option.responsive_camera"))
+				.setTooltip(tooltip("framegen.option.responsive_camera"))
+				.setImpact(OptionImpact.LOW)
+				.setDefaultValue(true)
+				.setEnabledProvider(s -> s.readBooleanOption(enabledId), enabledId)
+				.setBinding(v -> c.responsiveCamera = v, () -> c.responsiveCamera)
 				.setStorageHandler(save));
 
 		OptionGroupBuilder display = builder.createOptionGroup()
