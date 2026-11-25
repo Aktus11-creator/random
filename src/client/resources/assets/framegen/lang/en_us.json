@@ -47,6 +47,7 @@
 	"framegen.status.failed": "FrameGen inactive: could not start (see log)",
 	"framegen.stats.off": "FrameGen off | %s fps",
 	"framegen.stats.idle": "FrameGen idle (menu) | %s fps",
+	"framegen.stats.redirected": "FrameGen paused | %s fps (another mod, e.g. Supersample, is changing the render resolution)",
 	"framegen.stats.native": "FrameGen native | %s fps (game already keeps up with the display, nothing to generate)",
 	"framegen.stats.on": "FrameGen %s fps (real %s) | %s | delay %s ms | present %s ms"
 }

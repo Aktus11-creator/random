@@ -14,6 +14,7 @@ import com.mojang.renderpearl.api.textures.GpuTexture;
 import com.mojang.renderpearl.api.textures.GpuTextureView;
 import com.mojang.renderpearl.backend.opengl.GlTexture;
 import dev.framegen.FrameGenConfig;
+import dev.framegen.FrameGenMod;
 import dev.framegen.mixin.LevelRendererAccessor;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -69,6 +70,13 @@ public final class FrameCapture {
 	private final List<PendingQuad> pendingQuads = new ArrayList<>(MAX_QUADS);
 	private @Nullable GpuSlot worldSlot;
 	private final Matrix4f levelProjection = new Matrix4f();
+	/**
+	 * Another mod (e.g. a supersampling mod) presents a different image than Minecraft's main target. The layer
+	 * splitting then can't work, so frames are passed through unchanged until it stops for a while.
+	 */
+	private boolean redirectActive;
+	private int framesWithoutRedirect;
+	private boolean redirectLogged;
 	private boolean levelProjectionSet;
 
 	// Persistent resources --------------------------------------------------------------------------------------
@@ -104,7 +112,13 @@ public final class FrameCapture {
 		this.record.simNanos = System.nanoTime();
 		Minecraft mc = Minecraft.getInstance();
 		FrameGenConfig config = FrameGenConfig.get();
-		this.splitPlanned = config.enabled && FrameGenEngine.isPresenterRunning() && mc.level != null && mc.gui.screen() == null && mc.gui.overlay() == null;
+		this.splitPlanned = config.enabled && FrameGenEngine.isPresenterRunning() && mc.level != null && mc.gui.screen() == null && mc.gui.overlay() == null
+			&& !this.redirectActive;
+	}
+
+	/** True while another mod substitutes the presented image (frame generation is paused meanwhile). */
+	public boolean isRedirected() {
+		return this.redirectActive;
 	}
 
 	public boolean interceptsHudBlits() {
@@ -230,7 +244,24 @@ public final class FrameCapture {
 
 		// The main target is only resized at the start of GameRenderer.render, so the world slot captured at hook A
 		// always matches it here. (If the GUI was split, the layered path is also the only way to rebuild the image.)
-		boolean layered = this.worldCaptured && this.worldSlot != null;
+		// The texture handed to the swapchain blit is, by contract, the frame to show. Normally it is the main
+		// target; if another mod substitutes its own (a supersampling mod downscaling a larger main target, ...),
+		// present exactly that image and stop splitting layers, which assume the main target is the final image.
+		GpuTexture presented = mainColor.texture();
+		boolean redirected = presented != main.getColorTexture();
+		if (redirected) {
+			this.redirectActive = true;
+			this.framesWithoutRedirect = 0;
+			if (!this.redirectLogged) {
+				this.redirectLogged = true;
+				FrameGenMod.LOGGER.warn("FrameGen: another mod presents its own image instead of Minecraft's main framebuffer ({}x{} vs {}x{}). "
+					+ "Frames are shown unchanged and frame generation is paused while it does (supersampling / resolution scaling mods do this).",
+					w, h, main.width, main.height);
+			}
+		} else if (this.redirectActive && ++this.framesWithoutRedirect > 120) {
+			this.redirectActive = false;
+		}
+		boolean layered = this.worldCaptured && this.worldSlot != null && !redirected;
 		if (layered) {
 			this.writeCompositeUbo(encoder);
 			GpuTextureView vignette = this.vignetteIntercepted && this.vignetteView != null ? this.vignetteView : this.blankView();
@@ -252,7 +283,7 @@ public final class FrameCapture {
 				// HUD separation disabled: the whole frame minus the world is not separable, so the overlay is empty
 				// and the world layer is the full image (HUD gets warped with the world).
 				encoder.clearColorTexture(overlay.color, TRANSPARENT);
-				encoder.copyTextureToTexture(main.getColorTexture(), this.worldSlot.color, 0, 0, 0, 0, 0, w, h);
+				encoder.copyTextureToTexture(presented, this.worldSlot.color, 0, 0, 0, 0, 0, w, h);
 			}
 			r.opaque = false;
 			r.world = this.worldSlot;
@@ -266,7 +297,7 @@ public final class FrameCapture {
 			if (this.worldSlot != null) {
 				this.exchange.abandon(this.worldSlot);
 			}
-			encoder.copyTextureToTexture(main.getColorTexture(), overlay.color, 0, 0, 0, 0, 0, w, h);
+			encoder.copyTextureToTexture(presented, overlay.color, 0, 0, 0, 0, 0, w, h);
 			r.opaque = true;
 			r.world = null;
 		}
@@ -279,7 +310,7 @@ public final class FrameCapture {
 			this.replayQuads(encoder, mainColor, r, guiScale, w, h);
 			if (r.opaque) {
 				// The overlay is the full image: it must contain the crosshair too.
-				encoder.copyTextureToTexture(main.getColorTexture(), overlay.color, 0, 0, 0, 0, 0, w, h);
+				encoder.copyTextureToTexture(presented, overlay.color, 0, 0, 0, 0, 0, w, h);
 				r.invertQuads.clear();
 			}
 		}
