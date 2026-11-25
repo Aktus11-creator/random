@@ -25,7 +25,7 @@
 	"framegen.option.enabled": "Frame Generation",
 	"framegen.option.enabled.tooltip": "Generate in-between frames by reprojecting the last real frames with their depth buffer. Camera motion is shown at your display's refresh rate while the game renders fewer real frames. Toggle in game with F8.",
 	"framegen.option.mode": "Mode",
-	"framegen.option.mode.tooltip": "Extrapolate (default): predicts the camera forward from the newest real frame. No input delay added on top of the game's own.\nInterpolate: blends between the two newest real frames. Fewest visual artifacts, but adds about one real frame of input delay.",
+	"framegen.option.mode.tooltip": "Interpolate (default): blends between the two newest real frames. Smoothest, especially at low frame rates; adds about one real frame of latency.\nExtrapolate: predicts the camera forward from the newest frame. No added latency; less smooth at low frame rates and may briefly overshoot when you stop turning.",
 	"framegen.option.quality": "Quality",
 	"framegen.option.quality.tooltip": "Number of solver iterations per pixel and whether disoccluded areas are filled with background. Higher is more accurate around edges and costs a bit more GPU time on the presentation thread.",
 	"framegen.option.multiplier": "Real FPS Limit",

@@ -24,10 +24,10 @@ presenter (own thread)    ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ �
   reconstructed geometrically. An iterative inverse-warp solver with edge-aware depth sampling finds, for each output
   pixel, the source pixel that lands there. It fills disocclusions with background, not by smearing foreground edges.
 - **Two modes**
-  - *Extrapolate* (default): predicts forward from the newest frame. It adds no input delay but can briefly
-    overshoot when you stop turning.
-  - *Interpolate*: blends between the two real frames around the displayed moment. It has the fewest artifacts
-    but adds about one real frame of input delay.
+  - *Interpolate* (default): blends between the two real frames around the displayed moment. It's the smoothest,
+    especially at low frame rates, and adds about one real frame of latency.
+  - *Extrapolate*: predicts forward from the newest frame. It adds no latency but is less smooth at low frame
+    rates and can briefly overshoot when you stop turning.
 - **Sharp HUD and hand.** The world, the first-person hand and the HUD are captured as separate layers. Only the
   world is reprojected, so the hotbar, chat, crosshair and hand never wobble or smear. The vignette (multiply blend)
   and the crosshair (invert blend) are replayed exactly over the generated image.
@@ -169,6 +169,11 @@ Nvidium only enables itself on NVIDIA GPUs with mesh shaders. The test machine h
 disabled; its rendering path was checked by code review, not by running it.
 
 ## Changelog
+
+**1.4.1**
+- Reverted the 1.3.1 latency changes. Interpolate is the default again (configs switched to Extrapolate by
+  1.3.1 are switched back), and Extrapolate uses its original timing. Extrapolation wasn't smooth at low frame
+  rates.
 
 **1.4.0**
 - **First-person hand no longer disappears.** The hand layer used to be detected from alpha only, and with some

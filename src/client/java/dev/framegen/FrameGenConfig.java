@@ -40,7 +40,7 @@ public final class FrameGenConfig {
 
 	/** Master switch. When off, frames are passed through unchanged. */
 	public volatile boolean enabled = true;
-	public volatile Mode mode = Mode.EXTRAPOLATE;
+	public volatile Mode mode = Mode.INTERPOLATE;
 	public volatile Quality quality = Quality.MEDIUM;
 	/**
 	 * Real frame rate limit while generating, as a divisor of the output rate: 1 = never render more real frames
@@ -63,7 +63,7 @@ public final class FrameGenConfig {
 	/** Debug view: tint generated pixels by how well the reprojection converged. */
 	public volatile boolean debugView = false;
 
-	private static final int CURRENT_VERSION = 3;
+	private static final int CURRENT_VERSION = 4;
 	private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 	private static FrameGenConfig instance;
 
@@ -91,10 +91,9 @@ public final class FrameGenConfig {
 							cfg.multiplier = 1;
 							if (cfg.quality == Quality.HIGH) cfg.quality = Quality.MEDIUM; // old default, now the costlier tier
 						}
-						if (cfg.configVersion < 3) {
-							// Up to 1.3 the default was Interpolate, which adds about one real frame of input delay.
-							// Extrapolate (no added delay) is the default now.
-							cfg.mode = Mode.EXTRAPOLATE;
+						if (cfg.configVersion == 3) {
+							// 1.3.1 forced Extrapolate; at low frame rates it isn't smooth. Back to the Interpolate default.
+							cfg.mode = Mode.INTERPOLATE;
 						}
 						cfg.configVersion = CURRENT_VERSION;
 						cfg.sanitize();
@@ -114,7 +113,7 @@ public final class FrameGenConfig {
 	}
 
 	private void sanitize() {
-		if (this.mode == null) this.mode = Mode.EXTRAPOLATE;
+		if (this.mode == null) this.mode = Mode.INTERPOLATE;
 		if (this.quality == null) this.quality = Quality.MEDIUM;
 		if (this.multiplier < 0 || this.multiplier > 8) this.multiplier = 1;
 		if (this.targetOutputFps < 0 || this.targetOutputFps > 1000) this.targetOutputFps = 0;
