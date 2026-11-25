@@ -634,7 +634,11 @@ public final class Presenter implements Runnable {
 	private double chooseDisplayTime(FrameGenConfig config, long now, FrameRecord newest) {
 		double latency = Math.max(0.0, this.latencyHigh);
 		double interval = this.intervalHigh > 0 ? this.intervalHigh : (this.intervalEma > 0 ? this.intervalEma : 1e9 / 60.0);
-		double targetDelay = config.mode == FrameGenConfig.Mode.INTERPOLATE ? latency + interval * 1.05 + 1.0e6 : latency;
+		// Extrapolation shows the pose at (now - typical render latency), i.e. exactly as old as a real frame is when
+		// it reaches the screen: no delay on top of vanilla. Use the average latency, not the cautious "high" estimate.
+		double targetDelay = config.mode == FrameGenConfig.Mode.INTERPOLATE
+			? latency + interval * 1.05 + 1.0e6
+			: Math.max(0.0, this.latencyEma);
 		long previousCall = this.lastClockNanos;
 		this.lastClockNanos = now;
 		boolean modeChanged = config.mode != this.clockMode;

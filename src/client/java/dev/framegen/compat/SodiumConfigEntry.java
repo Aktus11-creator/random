@@ -50,7 +50,7 @@ public final class SodiumConfigEntry implements ConfigEntryPoint {
 				.setName(Component.translatable("framegen.option.mode"))
 				.setTooltip(tooltip("framegen.option.mode"))
 				.setImpact(OptionImpact.LOW)
-				.setDefaultValue(FrameGenConfig.Mode.INTERPOLATE)
+				.setDefaultValue(FrameGenConfig.Mode.EXTRAPOLATE)
 				.setElementNameProvider(FrameGenMod::modeName)
 				.setEnabledProvider(s -> s.readBooleanOption(enabledId), enabledId)
 				.setBinding(v -> c.mode = v, () -> c.mode)

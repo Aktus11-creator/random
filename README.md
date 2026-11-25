@@ -24,10 +24,10 @@ presenter (own thread)    ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ �
   reconstructed geometrically. An iterative inverse-warp solver with edge-aware depth sampling finds, for each output
   pixel, the source pixel that lands there. It fills disocclusions with background, not by smearing foreground edges.
 - **Two modes**
-  - *Interpolate* (default): blends between the two real frames around the displayed moment. It has the fewest
-    artifacts and adds about one real frame of latency.
-  - *Extrapolate*: predicts forward from the newest frame. It adds no latency but can briefly overshoot when you
-    stop turning.
+  - *Extrapolate* (default): predicts forward from the newest frame. It adds no input delay but can briefly
+    overshoot when you stop turning.
+  - *Interpolate*: blends between the two real frames around the displayed moment. It has the fewest artifacts
+    but adds about one real frame of input delay.
 - **Sharp HUD and hand.** The world, the first-person hand and the HUD are captured as separate layers. Only the
   world is reprojected, so the hotbar, chat, crosshair and hand never wobble or smear. The vignette (multiply blend)
   and the crosshair (invert blend) are replayed exactly over the generated image.
@@ -169,6 +169,14 @@ Nvidium only enables itself on NVIDIA GPUs with mesh shaders. The test machine h
 disabled; its rendering path was checked by code review, not by running it.
 
 ## Changelog
+
+**1.3.1**
+- **Extrapolate is now the default mode**, and existing configs are switched over. It adds no input delay on top of
+  the game's own: the presented camera is exactly as old as a real frame when it reaches the screen. Interpolate
+  remains available for the fewest artifacts at about one real frame of added delay.
+- Extrapolation's timing now uses the average render latency instead of a cautious worst-case estimate.
+- With Extrapolate, switching between generating and native presentation no longer changes the delay, so the
+  view doesn't snap when the frame rate hovers around the display rate.
 
 **1.3.0**
 - **Supersampling / resolution-scaling mods are supported.** These mods render into a main target larger than

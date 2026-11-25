@@ -40,7 +40,7 @@ public final class FrameGenConfig {
 
 	/** Master switch. When off, frames are passed through unchanged. */
 	public volatile boolean enabled = true;
-	public volatile Mode mode = Mode.INTERPOLATE;
+	public volatile Mode mode = Mode.EXTRAPOLATE;
 	public volatile Quality quality = Quality.MEDIUM;
 	/**
 	 * Real frame rate limit while generating, as a divisor of the output rate: 1 = never render more real frames
@@ -63,7 +63,7 @@ public final class FrameGenConfig {
 	/** Debug view: tint generated pixels by how well the reprojection converged. */
 	public volatile boolean debugView = false;
 
-	private static final int CURRENT_VERSION = 2;
+	private static final int CURRENT_VERSION = 3;
 	private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 	private static FrameGenConfig instance;
 
@@ -84,11 +84,18 @@ public final class FrameGenConfig {
 			try (Reader reader = Files.newBufferedReader(file)) {
 				FrameGenConfig cfg = GSON.fromJson(reader, FrameGenConfig.class);
 				if (cfg != null) {
-					if (cfg.configVersion < 2) {
-						// 1.0/1.1 defaulted to capping the game at half the display rate, which made fast machines
-						// render far fewer real frames than they could. Reset to the new default.
-						cfg.multiplier = 1;
-						if (cfg.quality == Quality.HIGH) cfg.quality = Quality.MEDIUM; // old default, now the costlier tier
+					if (cfg.configVersion < CURRENT_VERSION) {
+						if (cfg.configVersion < 2) {
+							// 1.0/1.1 defaulted to capping the game at half the display rate, which made fast machines
+							// render far fewer real frames than they could. Reset to the new default.
+							cfg.multiplier = 1;
+							if (cfg.quality == Quality.HIGH) cfg.quality = Quality.MEDIUM; // old default, now the costlier tier
+						}
+						if (cfg.configVersion < 3) {
+							// Up to 1.3 the default was Interpolate, which adds about one real frame of input delay.
+							// Extrapolate (no added delay) is the default now.
+							cfg.mode = Mode.EXTRAPOLATE;
+						}
 						cfg.configVersion = CURRENT_VERSION;
 						cfg.sanitize();
 						cfg.save();
@@ -107,7 +114,7 @@ public final class FrameGenConfig {
 	}
 
 	private void sanitize() {
-		if (this.mode == null) this.mode = Mode.INTERPOLATE;
+		if (this.mode == null) this.mode = Mode.EXTRAPOLATE;
 		if (this.quality == null) this.quality = Quality.MEDIUM;
 		if (this.multiplier < 0 || this.multiplier > 8) this.multiplier = 1;
 		if (this.targetOutputFps < 0 || this.targetOutputFps > 1000) this.targetOutputFps = 0;
