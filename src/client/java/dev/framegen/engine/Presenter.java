@@ -271,6 +271,8 @@ public final class Presenter implements Runnable {
 		this.warp.setInt("uDepthB", 3);
 		this.warp.setInt("uOverlay", 4);
 		this.warp.setInt("uVignetteTex", 5);
+		this.warp.setInt("uOpaqueDepthA", 10);
+		this.warp.setInt("uOpaqueDepthB", 11);
 		this.warp.bindUniformBlock("FrameGenEntities", 0);
 		this.passthrough.use();
 		this.passthrough.setInt("uOverlay", 4);
@@ -795,6 +797,10 @@ public final class Presenter implements Runnable {
 		p.setVec2("uSizeB", b.world.width, b.world.height);
 		bindTexture(2, b.world.glColor, this.linearSampler);
 		bindTexture(3, b.world.glDepth, this.nearestSampler);
+		bindTexture(11, b.world.glOpaqueDepth, this.nearestSampler);
+		boolean seeThrough = config.seeThroughFix && !this.testNoSeeThrough && a != null && a.hasOpaqueDepth && b.hasOpaqueDepth;
+		p.setInt("uOpaqueA", seeThrough ? 1 : 0);
+		p.setInt("uOpaqueB", seeThrough ? 1 : 0);
 		boolean motion = config.movingObjects && !Double.isNaN(u);
 		this.target.motionMatrices(this.poseB, this.srcInv, this.tgt);
 		p.setMat4("uSrcInvB", this.srcInv);
@@ -819,9 +825,11 @@ public final class Presenter implements Runnable {
 			p.setVec2("uSizeA", a.world.width, a.world.height);
 			bindTexture(0, a.world.glColor, this.linearSampler);
 			bindTexture(1, a.world.glDepth, this.nearestSampler);
+			bindTexture(10, a.world.glOpaqueDepth, this.nearestSampler);
 		} else {
 			bindTexture(0, b.world.glColor, this.linearSampler);
 			bindTexture(1, b.world.glDepth, this.nearestSampler);
+			bindTexture(10, b.world.glOpaqueDepth, this.nearestSampler);
 		}
 		p.setInt("uEntCountA", movingA);
 		this.statMovingEntities = Math.max(movingA, movingB);
@@ -1109,6 +1117,8 @@ public final class Presenter implements Runnable {
 		this.setMotionRects(p, "B", moving);
 		if (moving > 0) this.flushMotion();
 		p.setInt("uEntCountA", 0);
+		p.setInt("uOpaqueA", 0);
+		p.setInt("uOpaqueB", 0);
 		GL33C.glBindBufferBase(GL33C.GL_UNIFORM_BUFFER, 0, this.entUbos[this.entUboIndex]);
 		p.setVec2("uSizeB", w, h);
 		p.setVec2("uOutSize", w, h);
@@ -1224,6 +1234,7 @@ public final class Presenter implements Runnable {
 	}
 
 	private boolean testDraw;
+	private boolean testNoSeeThrough;
 
 	/**
 	 * Interpolation self-test (debug only): generates the frame between real frames {@code f0} and {@code f2} at the
@@ -1244,13 +1255,16 @@ public final class Presenter implements Runnable {
 		java.nio.ByteBuffer camOnly = org.lwjgl.system.MemoryUtil.memAlloc(w * h * 4);
 		java.nio.ByteBuffer moving = org.lwjgl.system.MemoryUtil.memAlloc(w * h * 4);
 		java.nio.ByteBuffer real = org.lwjgl.system.MemoryUtil.memAlloc(w * h * 4);
+		java.nio.ByteBuffer noSeeThrough = org.lwjgl.system.MemoryUtil.memAlloc(w * h * 4);
 		this.testDraw = true;
 		try {
-			for (int pass = 0; pass < 2; pass++) {
+			for (int pass = 0; pass < 3; pass++) {
 				this.target.set(f1).showAsRendered();
+				this.testNoSeeThrough = pass == 2;
 				this.drawWarp(config, f0, f2, 1.0 - u, w, h, f0, pass == 0 ? Double.NaN : u, f1.simNanos);
-				GL33C.glReadPixels(0, 0, w, h, GL33C.GL_RGBA, GL33C.GL_UNSIGNED_BYTE, pass == 0 ? camOnly : moving);
+				GL33C.glReadPixels(0, 0, w, h, GL33C.GL_RGBA, GL33C.GL_UNSIGNED_BYTE, pass == 0 ? camOnly : pass == 1 ? moving : noSeeThrough);
 			}
+			this.testNoSeeThrough = false;
 			int movingCount = this.statMovingEntities;
 			GL33C.glFramebufferTexture2D(GL33C.GL_FRAMEBUFFER, GL33C.GL_COLOR_ATTACHMENT0, GL33C.GL_TEXTURE_2D, f1.world.glColor, 0);
 			GL33C.glReadPixels(0, 0, w, h, GL33C.GL_RGBA, GL33C.GL_UNSIGNED_BYTE, real);
@@ -1260,14 +1274,19 @@ public final class Presenter implements Runnable {
 			double cameraOnly = psnr(camOnly, real, w, x0, y0, w - x0, h - y0, null);
 			FrameGenMod.LOGGER.info("[self-test] interpolation at t={}: PSNR {} dB with entity motion ({} moving) vs. {} dB camera only",
 				String.format("%.2f", u), String.format("%.2f", withMotion), movingCount, String.format("%.2f", cameraOnly));
-			if (DUMP_DIR != null && movingCount > 0 && this.interpDumps < 6) {
+			if (f0.hasOpaqueDepth && f2.hasOpaqueDepth) {
+				FrameGenMod.LOGGER.info("[self-test] see-through surfaces: PSNR {} dB with the fix vs. {} dB without; camera moved {} blocks",
+					String.format("%.2f", withMotion), String.format("%.2f", psnr(noSeeThrough, real, w, x0, y0, w - x0, h - y0, null)),
+					String.format("%.2f", Math.sqrt((f2.camX - f0.camX) * (f2.camX - f0.camX) + (f2.camY - f0.camY) * (f2.camY - f0.camY) + (f2.camZ - f0.camZ) * (f2.camZ - f0.camZ))));
+			}
+			if (DUMP_DIR != null && f0.hasOpaqueDepth && this.interpDumps < 6) {
 				java.nio.ByteBuffer a = org.lwjgl.system.MemoryUtil.memAlloc(w * h * 4);
 				java.nio.ByteBuffer b = org.lwjgl.system.MemoryUtil.memAlloc(w * h * 4);
 				GL33C.glFramebufferTexture2D(GL33C.GL_FRAMEBUFFER, GL33C.GL_COLOR_ATTACHMENT0, GL33C.GL_TEXTURE_2D, f0.world.glColor, 0);
 				GL33C.glReadPixels(0, 0, w, h, GL33C.GL_RGBA, GL33C.GL_UNSIGNED_BYTE, a);
 				GL33C.glFramebufferTexture2D(GL33C.GL_FRAMEBUFFER, GL33C.GL_COLOR_ATTACHMENT0, GL33C.GL_TEXTURE_2D, f2.world.glColor, 0);
 				GL33C.glReadPixels(0, 0, w, h, GL33C.GL_RGBA, GL33C.GL_UNSIGNED_BYTE, b);
-				dumpImages(100 + this.interpDumps++, w, h, a, real, b, camOnly, moving);
+				dumpImages(100 + this.interpDumps++, w, h, a, real, b, noSeeThrough, moving);
 				org.lwjgl.system.MemoryUtil.memFree(a);
 				org.lwjgl.system.MemoryUtil.memFree(b);
 			}
@@ -1276,6 +1295,7 @@ public final class Presenter implements Runnable {
 			org.lwjgl.system.MemoryUtil.memFree(camOnly);
 			org.lwjgl.system.MemoryUtil.memFree(moving);
 			org.lwjgl.system.MemoryUtil.memFree(real);
+			org.lwjgl.system.MemoryUtil.memFree(noSeeThrough);
 			GL33C.glFramebufferTexture2D(GL33C.GL_FRAMEBUFFER, GL33C.GL_COLOR_ATTACHMENT0, GL33C.GL_TEXTURE_2D, 0, 0);
 			GL33C.glBindFramebuffer(GL33C.GL_FRAMEBUFFER, 0);
 			GL33C.glBindVertexArray(0);

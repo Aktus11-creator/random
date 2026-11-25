@@ -14,6 +14,7 @@
 		"EntityRenderStateMixin",
 		"EntityRendererMixin",
 		"FrameGraphBuilderMixin",
+		"LevelRendererMixin",
 		"LevelRendererAccessor",
 		"GuiGraphicsExtractorMixin",
 		"GlCommandEncoderMixin",

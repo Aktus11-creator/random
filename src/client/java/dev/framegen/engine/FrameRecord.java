@@ -72,6 +72,8 @@ public final class FrameRecord {
 
 	/** Camera discontinuity before this frame (teleport, respawn, dimension change...). Never interpolate across. */
 	public boolean cut;
+	/** The world slot's opaque depth is valid and differs from the depth where see-through surfaces were drawn. */
+	public boolean hasOpaqueDepth;
 	/** Depth buffer convention: true = glClipControl ZERO_TO_ONE (window depth == NDC z), false = default [-1, 1] mapping. */
 	public boolean zZeroToOne;
 

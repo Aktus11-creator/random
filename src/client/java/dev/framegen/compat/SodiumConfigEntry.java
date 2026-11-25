@@ -116,6 +116,14 @@ public final class SodiumConfigEntry implements ConfigEntryPoint {
 				.setStorageHandler(save));
 
 		OptionGroupBuilder display = builder.createOptionGroup()
+			.addOption(builder.createBooleanOption(id("see_through"))
+				.setName(Component.translatable("framegen.option.see_through"))
+				.setTooltip(tooltip("framegen.option.see_through"))
+				.setImpact(OptionImpact.LOW)
+				.setDefaultValue(true)
+				.setEnabledProvider(s -> s.readBooleanOption(enabledId), enabledId)
+				.setBinding(v -> c.seeThroughFix = v, () -> c.seeThroughFix)
+				.setStorageHandler(save))
 			.addOption(builder.createBooleanOption(id("moving_objects"))
 				.setName(Component.translatable("framegen.option.moving_objects"))
 				.setTooltip(tooltip("framegen.option.moving_objects"))

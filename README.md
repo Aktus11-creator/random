@@ -28,6 +28,8 @@ presenter (own thread)    ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ ▌ �
     especially at low frame rates, and adds about one real frame of latency.
   - *Extrapolate*: predicts forward from the newest frame. It adds no latency but is less smooth at low frame
     rates and can briefly overshoot when you stop turning.
+- **Stable water and glass.** What you see through water, stained glass and ice is reprojected with its own depth,
+  so it no longer slides around behind the surface when you move.
 - **Responsive camera.** Generated frames turn with your newest mouse movement (real input, not a prediction), so
   turning reacts sooner while the world stays as smooth as Interpolate makes it.
 - **Smooth mobs, players and items.** Moving entities are moved with their own motion in generated frames (walking,
@@ -87,6 +89,7 @@ Rebind them under *Options → Controls → Key Binds → FrameGen*.
 | Real FPS Limit | **Display rate** (default) means the game never renders more real frames than your display shows. FrameGen only fills in when the game drops below that. *1/2 display* and lower trade real frames for GPU headroom; use them only if the game stutters. *Game limit* uses your Max Framerate. |
 | Output FPS | Presentation rate when V-Sync is off ("Display" = refresh rate). |
 | Overscan | Extra field of view rendered around the screen, per side: Off / 4% / **8%** (default) / … / 24%. Generated frames use it for screen edges coming into view while you turn. Real frames look the same. Costs GPU time: 8% renders about 35% more world pixels. Skipped automatically while post effects or glowing entities are on screen. |
+| Stable Water and Glass | Reprojects what's seen through water, stained glass and ice with its own depth where that fits the real frames better (on by default). |
 | Responsive Camera | Turns the camera in generated frames with your newest mouse input instead of the interpolated rotation (on by default). First person only; off while riding, sleeping or with Cinematic Camera. |
 | Smooth Moving Objects | Moves mobs, players, items, minecarts and boats in generated frames (on by default). Limb animations still update at the real frame rate. |
 | Sharp HUD and Hand | Keeps HUD and hand out of the reprojection. Disable only if another mod's HUD looks wrong. |
@@ -138,6 +141,11 @@ The settings are stored in `config/framegen.json`.
   that is `W × H` instead of `w × h`. The centre `w × h` pixels are then exactly the normal image (pixel centres
   line up), and the culling frustum is widened to match. The presenter reads source frames with this wider
   projection and produces output with the normal one.
+- See-through surfaces: water, stained glass, ice and clouds write their own depth, so the final depth buffer would
+  move the scenery behind them as if it were painted on the surface. Right before Minecraft draws them, FrameGen
+  copies the depth buffer (`glCopyImageSubData`, no GL state touched) and keeps it next to the normal depth. Where
+  the two differ, the presenter reprojects with both and keeps the version on which the two real frames agree
+  better. That is usually the scenery behind the surface, and sometimes the surface itself (waves, glass edges).
 - Responsive camera: Minecraft reads input once per real frame. While a frame renders, the render thread (SDL's
   main thread) pumps SDL's event queue a few times (between level render passes, before the GUI, at present) and
   peeks at the mouse motion waiting there without removing it, so the game still gets every event. That motion,
@@ -199,6 +207,14 @@ Nvidium only enables itself on NVIDIA GPUs with mesh shaders. The test machine h
 disabled; its rendering path was checked by code review, not by running it.
 
 ## Changelog
+
+**1.8.0**
+- **Water, stained glass and ice no longer make the world behind them wobble.** Before, what you saw through them
+  was moved as if it were painted on the surface, so it slid around when you walked or strafed. New *Stable Water
+  and Glass* setting (on by default). In the test, strafing past a stained-glass window, generated frames came out
+  1–3 dB closer to the real frames.
+- Only applies with the default transparency mode. With *Improved Transparency* on, Minecraft draws those
+  surfaces differently and the old behaviour remains.
 
 **1.7.0**
 - **Turning reacts much sooner in Interpolate.** New *Responsive Camera* setting (on by default): generated frames
@@ -296,6 +312,8 @@ disabled; its rendering path was checked by code review, not by running it.
 - Entities move with their position and body turn; limb animations, head turns, particles and animated textures
   update at the real frame rate. Parts of a model that stick far out of its hitbox may not move with it. In
   interpolation mode, conflicting pixels snap to the nearer real frame instead of ghosting.
+- With *Improved Transparency* (Video Settings), the see-through fix doesn't apply. Effects drawn without depth
+  (rain, snow, particles) are still reprojected with the depth behind them.
 - With Responsive Camera, very fast flicks can turn further ahead of the newest real frame than the overscan margin
   covers, and some edge stretching returns for those moments. Raising Overscan helps.
 - Screen edges that come into view are taken from the overscan margin. A turn larger than the margin between two

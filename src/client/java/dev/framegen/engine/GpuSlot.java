@@ -30,8 +30,12 @@ public final class GpuSlot {
 	@Nullable GpuTexture depth;
 	@Nullable GpuTextureView colorView;
 	@Nullable GpuTextureView depthView;
+	/** WORLD only: depth before translucent blocks were drawn (what is seen through water and stained glass). */
+	@Nullable GpuTexture opaqueDepth;
+	@Nullable GpuTextureView opaqueDepthView;
 	int glColor;
 	int glDepth;
+	int glOpaqueDepth;
 	int width;
 	int height;
 	/** Guarded by the exchange lock. */
@@ -60,6 +64,9 @@ public final class GpuSlot {
 			this.depth = device.createTexture(base + " / depth", usage, GpuFormat.D32_FLOAT, width, height, 1, 1);
 			this.depthView = device.createTextureView(this.depth);
 			this.glDepth = ((GlTexture) this.depth).glId();
+			this.opaqueDepth = device.createTexture(base + " / opaque depth", usage, GpuFormat.D32_FLOAT, width, height, 1, 1);
+			this.opaqueDepthView = device.createTextureView(this.opaqueDepth);
+			this.glOpaqueDepth = ((GlTexture) this.opaqueDepth).glId();
 		}
 		this.width = width;
 		this.height = height;
@@ -76,7 +83,12 @@ public final class GpuSlot {
 	void destroyTextures() {
 		if (this.colorView != null) this.colorView.close();
 		if (this.depthView != null) this.depthView.close();
+		if (this.opaqueDepthView != null) this.opaqueDepthView.close();
+		if (this.opaqueDepth != null) this.opaqueDepth.close();
 		this.depthView = null;
+		this.opaqueDepthView = null;
+		this.opaqueDepth = null;
+		this.glOpaqueDepth = 0;
 		if (this.color != null) this.color.close();
 		if (this.depth != null) this.depth.close();
 		this.colorView = null;

@@ -66,6 +66,8 @@ public final class FrameGenConfig {
 	public volatile boolean movingObjects = true;
 	/** Turn the camera in generated frames with the newest mouse input (see InputLatch). */
 	public volatile boolean responsiveCamera = true;
+	/** Reproject what is seen through water, stained glass and ice with its own depth when that fits better. */
+	public volatile boolean seeThroughFix = true;
 	/** Wait for the GPU after every present. Lowers latency and improves pacing on most drivers. */
 	public volatile boolean lowLatencyPresent = true;
 	/** Show the frame generation statistics line in the HUD. */

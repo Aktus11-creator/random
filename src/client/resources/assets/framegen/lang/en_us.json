@@ -43,6 +43,8 @@
 	"framegen.option.moving_objects.tooltip": "Move mobs, players, items, minecarts and boats smoothly in generated frames, instead of only the camera. Walking and turning are smoothed; limb animations still update at the real frame rate.",
 	"framegen.option.responsive_camera": "Responsive Camera",
 	"framegen.option.responsive_camera.tooltip": "Turn the camera in generated frames with your newest mouse movement, instead of waiting for the next real frame. Turning reacts sooner while the world stays as smooth as before. It uses your real mouse input, not a prediction, so it never overshoots. First person only.",
+	"framegen.option.see_through": "Stable Water and Glass",
+	"framegen.option.see_through.tooltip": "Keep what you see through water, stained glass and ice from sliding around in generated frames when you move. FrameGen remembers the depth of what's behind those surfaces and uses it where it fits better.",
 	"framegen.option.sharp_hud": "Sharp HUD and Hand",
 	"framegen.option.sharp_hud.tooltip": "Keep the HUD and your first-person hand out of the reprojection so they never wobble or smear. Disable only if another mod draws HUD elements that look wrong.",
 	"framegen.option.extrapolation": "Max Prediction",

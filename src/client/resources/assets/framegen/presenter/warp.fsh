@@ -22,6 +22,11 @@ uniform sampler2D uDepthA;
 uniform sampler2D uColorB;
 uniform sampler2D uDepthB;
 uniform sampler2D uOverlay;
+// Depth before water, stained glass, ice and clouds were drawn: the depth of what is seen through them.
+uniform sampler2D uOpaqueDepthA;
+uniform sampler2D uOpaqueDepthB;
+uniform int uOpaqueA;
+uniform int uOpaqueB;
 uniform sampler2D uVignetteTex;
 
 // Source NDC (+ depth) -> target clip space, with and without the camera translation (sky/void has no parallax).
@@ -130,6 +135,7 @@ struct Candidate {
     float z;     // target NDC depth of the reconstructed point (reversed-Z: larger = nearer)
     bool moved;  // the point belongs to a moving entity
     int movedId; // which one (index in the frame's entity list), -1 if none
+    vec2 s;      // source position (NDC)
 };
 
 // Like forwardMap, but moves points that lie inside an entity box with that entity.
@@ -250,6 +256,7 @@ Candidate reproject(sampler2D colorTex, sampler2D depthTex, vec2 size, mat4 fwd,
     c.z = zt;
     c.moved = moved;
     c.movedId = movedId;
+    c.s = s;
     return c;
 }
 
@@ -277,6 +284,13 @@ Candidate reprojectAll(sampler2D colorTex, sampler2D depthTex, vec2 size, mat4 f
     return c;
 }
 
+// A see-through surface (water, stained glass, ice, clouds) is in front of the scenery at this source position.
+bool seeThrough(sampler2D depthTex, sampler2D opaqueTex, vec2 size, vec2 s) {
+    float d = fetchDepthNearest(depthTex, size, s);
+    float o = fetchDepthNearest(opaqueTex, size, s);
+    return d > o * 1.0005 + 1e-7; // reversed-Z: the surface is nearer = larger
+}
+
 void main() {
     vec2 t = vUv * 2.0 - 1.0;
 
@@ -302,6 +316,28 @@ void main() {
             Candidate c2 = aFirst
                 ? reprojectAll(uColorB, uDepthB, uSizeB, uFwdB, uFwdRotB, uInvB, uInvRotB, uSrcInvB, uTgtB, ENT_B, uEntCountB, uSrcRectB, uTgtRectB, t)
                 : reprojectAll(uColorA, uDepthA, uSizeA, uFwdA, uFwdRotA, uInvA, uInvRotA, uSrcInvA, uTgtA, 0, uEntCountA, uSrcRectA, uTgtRectA, t);
+            // See-through surfaces: both frames show the surface *and* what's behind it, but carry only the surface's
+            // depth. Reproject again with the depth of what's behind, and keep whichever version the two frames agree
+            // on better: the background through a window, or the surface itself (waves, glass edges).
+            if (uOpaqueA == 1 && uOpaqueB == 1) {
+                vec2 sA = aFirst ? c1.s : c2.s;
+                vec2 sB = aFirst ? c2.s : c1.s;
+                if (seeThrough(uDepthA, uOpaqueDepthA, uSizeA, sA) || seeThrough(uDepthB, uOpaqueDepthB, uSizeB, sB)) {
+                    Candidate oA = reprojectAll(uColorA, uOpaqueDepthA, uSizeA, uFwdA, uFwdRotA, uInvA, uInvRotA, uSrcInvA, uTgtA, 0, uEntCountA, uSrcRectA, uTgtRectA, t);
+                    Candidate oB = reprojectAll(uColorB, uOpaqueDepthB, uSizeB, uFwdB, uFwdRotB, uInvB, uInvRotB, uSrcInvB, uTgtB, ENT_B, uEntCountB, uSrcRectB, uTgtRectB, t);
+                    vec3 dSurface = abs(c1.color - c2.color);
+                    vec3 dBehind = abs(oA.color - oB.color);
+                    float confBehind = min(confidence(oA.err), confidence(oB.err));
+                    if (confBehind > 0.5 && dot(dBehind, vec3(1.0)) + 0.02 < dot(dSurface, vec3(1.0))) {
+                        c1 = aFirst ? oA : oB;
+                        c2 = aFirst ? oB : oA;
+                        conf1 = confidence(c1.err);
+                        world = c1.color;
+                        shownErr = c1.err;
+                        shownMoved = c1.moved;
+                    }
+                }
+            }
             float conf2 = confidence(c2.err);
             float w1 = wFirst * conf1;
             float w2 = (1.0 - wFirst) * conf2;

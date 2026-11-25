@@ -125,6 +125,11 @@ public final class FrameCapture {
 	private int worldDisplayH;
 	private @Nullable GpuTextureView nativeWorld;
 	private @Nullable GpuBuffer cropUbo;
+	/** Depth of the level target just before translucent blocks were drawn (this frame), see {@link #beforeTranslucent}. */
+	private @Nullable GpuTexture opaqueDepth;
+	private @Nullable GpuTextureView opaqueDepthView;
+	private boolean opaqueDepthCaptured;
+	private int copyImageSupport = -1;
 	// The frame's GlobalSettingsUniform arguments, re-issued with the overscan size while it is active.
 	private @Nullable GlobalSettingsUniform globalSettings;
 	private double gsGlint;
@@ -272,6 +277,12 @@ public final class FrameCapture {
 		// other code can leave broken (see GlCommandEncoderMixin). At 1:1 the box filter is an exact copy.
 		this.downsample(encoder, source.getColorTextureView(), slot.colorView);
 		this.downsampleDepth(encoder, source.getDepthTextureView(), slot.depthView);
+		GpuTextureView opaque = this.opaqueDepthView;
+		boolean hasOpaque = this.opaqueDepthCaptured && opaque != null && opaque.getWidth(0) == source.width && opaque.getHeight(0) == source.height;
+		if (hasOpaque) {
+			this.downsampleDepth(encoder, opaque, slot.opaqueDepthView);
+		}
+		this.record.hasOpaqueDepth = hasOpaque;
 		if (this.snapshot != null && overscan) {
 			this.snapshot.capture(source.getColorTexture(), "A_overscan_target");
 		}
@@ -371,6 +382,37 @@ public final class FrameCapture {
 			r.entityVel[i * 3 + 2] = motion.framegen$vz();
 			r.entityYaw[i] = yaw;
 		}
+	}
+
+	/**
+	 * {@code LevelRenderer.executeClassicTransparency} HEAD: opaque and cut-out geometry is done, water, stained glass,
+	 * ice and clouds are next. Keep a copy of the depth now: it's the depth of what will be seen through them. They
+	 * write their own depth, so the final depth buffer alone would move the scenery behind a window or under water as if
+	 * it were painted on the surface. A render pass is open on the target at this point, so this is a plain
+	 * glCopyImageSubData, which changes no GL binding state.
+	 */
+	public void beforeTranslucent() {
+		if (!this.splitPlanned || this.record == null || !FrameGenConfig.get().seeThroughFix) return;
+		if (this.copyImageSupport < 0) {
+			var caps = org.lwjgl.opengl.GL.getCapabilities();
+			this.copyImageSupport = caps.OpenGL43 || caps.GL_ARB_copy_image ? 1 : 0;
+		}
+		if (this.copyImageSupport == 0) return;
+		RenderTarget main = Minecraft.getInstance().gameRenderer.mainRenderTarget();
+		GpuTexture depth = main.getDepthTexture();
+		if (!(depth instanceof GlTexture source)) return;
+		int w = depth.getWidth(0);
+		int h = depth.getHeight(0);
+		if (this.opaqueDepth == null || this.opaqueDepth.getWidth(0) != w || this.opaqueDepth.getHeight(0) != h) {
+			if (this.opaqueDepthView != null) this.opaqueDepthView.close();
+			if (this.opaqueDepth != null) this.opaqueDepth.close();
+			int usage = GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_COPY_SRC | GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_RENDER_ATTACHMENT;
+			this.opaqueDepth = RenderSystem.getDevice().createTexture("FrameGen opaque depth", usage, GpuFormat.D32_FLOAT, w, h, 1, 1);
+			this.opaqueDepthView = RenderSystem.getDevice().createTextureView(this.opaqueDepth);
+		}
+		org.lwjgl.opengl.GL43C.glCopyImageSubData(source.glId(), GL32C.GL_TEXTURE_2D, 0, 0, 0, 0,
+			((GlTexture) this.opaqueDepth).glId(), GL32C.GL_TEXTURE_2D, 0, 0, 0, 0, w, h, 1);
+		this.opaqueDepthCaptured = true;
 	}
 
 	// ==== Overscan ================================================================================================
@@ -781,6 +823,7 @@ public final class FrameCapture {
 		this.vignetteView = null;
 		this.pendingQuads.clear();
 		this.levelProjectionSet = false;
+		this.opaqueDepthCaptured = false;
 		this.levelTarget = null;
 		this.scaled = false;
 		this.guiTarget = null;
@@ -961,6 +1004,10 @@ public final class FrameCapture {
 		if (this.compositeUbo != null) this.compositeUbo.close();
 		if (this.quadUbo != null) this.quadUbo.close();
 		if (this.cropUbo != null) this.cropUbo.close();
+		if (this.opaqueDepthView != null) this.opaqueDepthView.close();
+		if (this.opaqueDepth != null) this.opaqueDepth.close();
+		this.opaqueDepthView = null;
+		this.opaqueDepth = null;
 		if (this.overscanTarget != null) this.overscanTarget.destroyBuffers();
 		this.cropUbo = null;
 		this.overscanTarget = null;
