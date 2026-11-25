@@ -117,6 +117,26 @@ public final class FrameGenEngine {
 		return vanilla;
 	}
 
+	/** One-line description of the window for diagnostics (render thread). */
+	static String describeWindow() {
+		if (window == 0L) return "?";
+		try (MemoryStack stack = MemoryStack.stackPush()) {
+			IntBuffer lw = stack.mallocInt(1);
+			IntBuffer lh = stack.mallocInt(1);
+			IntBuffer pw = stack.mallocInt(1);
+			IntBuffer ph = stack.mallocInt(1);
+			SDLVideo.SDL_GetWindowSize(window, lw, lh);
+			SDLVideo.SDL_GetWindowSizeInPixels(window, pw, ph);
+			float density = SDLVideo.SDL_GetWindowPixelDensity(window);
+			float scale = SDLVideo.SDL_GetWindowDisplayScale(window);
+			long flags = SDLVideo.SDL_GetWindowFlags(window);
+			return String.format(java.util.Locale.ROOT, "window %dx%d logical, %dx%d pixels, pixel density %.2f, display scale %.2f, fullscreen %s",
+				lw.get(0), lh.get(0), pw.get(0), ph.get(0), density, scale, (flags & SDLVideo.SDL_WINDOW_FULLSCREEN) != 0);
+		} catch (Throwable t) {
+			return "? (" + t + ")";
+		}
+	}
+
 	static void onPresenterCrashed(Throwable t) {
 		presenterCrash = t;
 	}

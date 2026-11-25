@@ -170,6 +170,12 @@ disabled; its rendering path was checked by code review, not by running it.
 
 ## Changelog
 
+**1.2.1**
+- Frames are now placed on screen 1:1 exactly like vanilla's swapchain blit. If the game frame and the window ever
+  differ in size, the image is no longer stretched (zoomed). The log records both sizes when that happens.
+- The log records window size, pixel density, display scale and fullscreen state when the surface is configured,
+  to help diagnose display issues.
+
 **1.2.0**
 - The real frame rate is no longer capped at half the display rate by default, which made fast PCs render far
   fewer real frames than they could. The new default is the display rate, and existing configs are migrated.

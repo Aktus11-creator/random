@@ -73,8 +73,8 @@ final class FrameGenSurface implements GpuSurface {
 			this.vanilla.configure(config);
 			return;
 		}
-		if (Presenter.DEBUG_LOG && !previous.equals(this.configuration)) {
-			FrameGenMod.LOGGER.info("[surface] configure {}x{} {}", config.width(), config.height(), config.presentMode());
+		if (!previous.equals(this.configuration)) {
+			FrameGenMod.LOGGER.info("FrameGen surface {}x{} {} ({})", config.width(), config.height(), config.presentMode(), FrameGenEngine.describeWindow());
 		}
 		this.presenter.configure(config.width(), config.height(), config.presentMode() == PresentMode.FIFO || config.presentMode() == PresentMode.FIFO_RELAXED);
 	}

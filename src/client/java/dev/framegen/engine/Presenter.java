@@ -354,10 +354,21 @@ public final class Presenter implements Runnable {
 		}
 
 		long start = System.nanoTime();
-		int w = this.surfaceWidth;
-		int h = this.surfaceHeight;
+		int sw = this.surfaceWidth;
+		int sh = this.surfaceHeight;
 		GL33C.glBindFramebuffer(GL33C.GL_FRAMEBUFFER, 0);
-		GL33C.glViewport(0, 0, w, h);
+		// Place the game's image exactly like vanilla's swapchain blit does: 1:1 pixels, aligned to the top-left,
+		// never stretched. Normally the frame and the window are the same size; if they ever differ (fullscreen mode
+		// switches, display scaling, the borderless-fullscreen 1px padding...) the result still matches vanilla
+		// instead of being zoomed.
+		int w = newest.width > 0 ? newest.width : sw;
+		int h = newest.height > 0 ? newest.height : sh;
+		if (w != sw || h != sh) {
+			this.logSizeMismatch(w, h, sw, sh);
+			GL33C.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+			GL33C.glClear(GL33C.GL_COLOR_BUFFER_BIT);
+		}
+		GL33C.glViewport(0, h <= sh ? sh - h : 0, w, h);
 		GL33C.glBindVertexArray(this.vao);
 
 		this.beginGpuTimer();
@@ -491,6 +502,20 @@ public final class Presenter implements Runnable {
 	}
 
 	// ---- Drawing ----------------------------------------------------------------------------------------------
+
+	private int loggedMismatchW = -1;
+	private int loggedMismatchH = -1;
+	private int loggedSurfaceW = -1;
+	private int loggedSurfaceH = -1;
+
+	private void logSizeMismatch(int w, int h, int sw, int sh) {
+		if (w == this.loggedMismatchW && h == this.loggedMismatchH && sw == this.loggedSurfaceW && sh == this.loggedSurfaceH) return;
+		this.loggedMismatchW = w;
+		this.loggedMismatchH = h;
+		this.loggedSurfaceW = sw;
+		this.loggedSurfaceH = sh;
+		FrameGenMod.LOGGER.info("FrameGen: game frame is {}x{} but the window surface is {}x{}; presenting 1:1 like vanilla", w, h, sw, sh);
+	}
 
 	private void drawOpaque(FrameRecord r) {
 		this.passthrough.use();
